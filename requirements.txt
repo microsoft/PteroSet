@@ -1,0 +1,16 @@
+PytorchWildlife>=1.2.4
+torch>=2.0.0
+torchaudio>=2.0.0
+torchvision>=0.15.0
+pytorch-lightning>=2.0.0
+lightning>=2.0.0
+torchinfo
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+librosa>=0.10.0
+soundfile>=0.12.0
+tqdm>=4.60.0
+pyyaml>=6.0
+wandb>=0.15.0
+omegaconf>=2.3.0
