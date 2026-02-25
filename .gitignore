@@ -4,6 +4,10 @@ data/labels_48kHz/
 data/spectrograms/
 data/*.json
 data/*.csv
+data/fold*/
 outputs/
 *.ckpt
 *.pt
+data/annotations_examples/
+data/audios_48khz/
+data/labels_48khz/

@@ -3,10 +3,10 @@ Generic dataset preparation script for PW_Bioacoustics.
 
 Usage:
     # Full pipeline
-    python prepare_dataset.py --config config/template.yaml
+    python prepare_dataset.py --config data/config.yaml
 
     # Run specific steps only
-    python prepare_dataset.py --config config/template.yaml --steps stats windows
+    python prepare_dataset.py --config data/config.yaml --steps stats windows
 
     # Available steps: stats, windows, spectrograms, splits
 """
@@ -89,7 +89,7 @@ def run_windows(config: DomainConfig) -> List[dict]:
     print(f"{'='*60}")
 
     annotation_path = config.paths.annotations_path
-    output_dir = config.paths.output_root
+    output_dir = config.paths.data_root
     os.makedirs(output_dir, exist_ok=True)
 
     windows_output_path = os.path.join(
@@ -203,7 +203,7 @@ def run_splits(config: DomainConfig, windows: List[dict]) -> None:
     print(f"{'='*60}")
 
     spectrograms_dir = config.paths.spectrograms_dir
-    output_dir = config.paths.output_root
+    output_dir = config.paths.data_root
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"Spectrograms directory: {spectrograms_dir}")
@@ -306,7 +306,7 @@ def run_splits(config: DomainConfig, windows: List[dict]) -> None:
 
 def load_windows_if_exists(config: DomainConfig) -> Optional[List[dict]]:
     """Load windows from file if they exist."""
-    output_dir = config.paths.output_root
+    output_dir = config.paths.data_root
     windows_output_path = os.path.join(
         output_dir,
         f"windows_mapping_{config.audio.overlap_sec}overlap.json"
@@ -325,16 +325,16 @@ def main():
         epilog="""
 Examples:
     # Full pipeline
-    python prepare_dataset.py --config config/template.yaml
+    python prepare_dataset.py --config data/config.yaml
 
     # Only compute statistics and build windows
-    python prepare_dataset.py --config config/template.yaml --steps stats windows
+    python prepare_dataset.py --config data/config.yaml --steps stats windows
 
     # Only compute spectrograms (windows must already exist)
-    python prepare_dataset.py --config config/template.yaml --steps spectrograms
+    python prepare_dataset.py --config data/config.yaml --steps spectrograms
 
     # Only create splits (windows and spectrograms must already exist)
-    python prepare_dataset.py --config config/template.yaml --steps splits
+    python prepare_dataset.py --config data/config.yaml --steps splits
         """
     )
 
@@ -354,12 +354,6 @@ Examples:
     # Load configuration
     print(f"Loading config from: {args.config}")
     config = load_config(args.config)
-
-    print(f"\nDomain: {config.name}")
-    print(f"Datasets: {config.datasets}")
-    print(f"Classes: {config.class_names}")
-    print(f"Data root: {config.paths.data_root}")
-    print(f"Output root: {config.paths.output_root}")
 
     # Track windows (needed for some steps)
     windows = None

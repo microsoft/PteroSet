@@ -12,15 +12,24 @@ Usage:
 
     # With YAML config
     python train.py --config config/template.yaml --train_csv train.csv --test_csv test.csv
+
+    # Cross-validation with all 5 folds
+    python train.py --cross_validation --fold_dir data
+
+    # Cross-validation with specific fold
+    python train.py --cross_validation --fold_dir data --fold 0
 """
 
 import argparse
 from dataclasses import dataclass, field
 from typing import Optional, List
+import os
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
 from torchinfo import summary
+import numpy as np
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
@@ -41,7 +50,7 @@ class DataModuleConfig:
     train_csv: str = "train_split.csv"
     val_csv: str = "val_split.csv"
     test_csv: str = "test_split.csv"
-    root: Optional[str] = "mel_spectrograms"
+    spectrograms_root: Optional[str] = "spectrograms"
     x_col: str = "spec_name"
     y_col: str = "label"
     target_size: list = field(default_factory=lambda: [224, 469])
@@ -106,7 +115,7 @@ class SpectrogramDataModule(pl.LightningDataModule):
 
     def setup(self, stage: Optional[str] = None):
         dataset_kwargs = dict(
-            root=self.cfg.root,
+            root=self.cfg.spectrograms_root,
             x_col=self.cfg.x_col,
             y_col=self.cfg.y_col,
             target_size=self.cfg.target_size,
@@ -189,6 +198,144 @@ class SpectrogramDataModule(pl.LightningDataModule):
         )
 
 
+def train_single_fold(args, fold_num=None):
+    """Train and evaluate on a single fold."""
+    
+    # Determine fold-specific paths
+    if args.cross_validation and args.fold_dir:
+        fold_dirs = sorted([d for d in os.listdir(args.fold_dir) if d.startswith('fold_')])
+        if fold_num is not None:
+            fold_path = os.path.join(args.fold_dir, fold_dirs[fold_num])
+        else:
+            fold_path = args.fold_dir
+        
+        train_csv = os.path.join(fold_path, 'train_split.csv')
+        val_csv = os.path.join(fold_path, 'val_split.csv')
+        test_csv = os.path.join(fold_path, 'test_split.csv')
+    else:
+        train_csv = args.train_csv
+        val_csv = args.val_csv
+        test_csv = args.test_csv
+    
+    # Create DataModule config
+    dm_cfg = DataModuleConfig(
+        train_csv=train_csv,
+        val_csv=val_csv,
+        test_csv=test_csv,
+        spectrograms_root=args.spectrograms_root,
+        x_col=args.x_col,
+        target_size=args.target_size,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        use_specaug=args.use_specaug,
+        normalize=args.normalize,
+        pcen=args.pcen,
+        num_classes=args.num_classes if args.num_classes != 2 else None,
+        use_mixup=(args.num_classes == 2),
+        mixup_prob=args.mixup_prob,
+        mixup_alpha=args.mixup_alpha,
+    )
+
+    dm = SpectrogramDataModule(dm_cfg)
+    dm.setup()
+
+    num_classes = args.num_classes if args.num_classes != 2 else dm.num_classes
+
+    model = ResNetClassifier(
+        num_classes=num_classes,
+        in_channels=dm.in_channels,
+        backbone=args.backbone,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        label_smoothing=args.label_smoothing,
+        T_max=args.epochs,
+        batch_size=args.batch_size,
+        pos_weight=args.pos_weight,
+        conf_threshold=args.conf_threshold,
+        freeze_backbone=args.freeze_backbone,
+        backbone_lr_ratio=args.backbone_lr_ratio,
+        class_names=args.class_names,
+    )
+
+    if fold_num is not None:
+        print(f"\n{'='*60}")
+        print(f"FOLD {fold_num} / 4")
+        print(f"{'='*60}")
+    
+    print(f"\nClassification mode: {'Binary' if num_classes == 2 else f'Multiclass ({num_classes} classes)'}")
+    if fold_num == 0 or fold_num is None:  # Only print summary for first fold or single run
+        print(summary(model, input_size=(args.batch_size, dm.in_channels, *args.target_size)))
+
+    # Callbacks & logging
+    mode = "min" if args.monitor_metric == "val/loss" else "max"
+
+    ckpt_dir = f"checkpoints/fold_{fold_num}" if fold_num is not None else "checkpoints"
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    ckpt_cb = ModelCheckpoint(
+        dirpath=ckpt_dir,
+        monitor=args.monitor_metric,
+        mode=mode,
+        save_top_k=1,
+        save_last=True,
+        filename="resnet-finetune-{epoch:02d}" if args.finetune else "resnet-{epoch:02d}",
+    )
+
+    early_cb = None
+    if not args.finetune:
+        early_cb = EarlyStopping(monitor=args.monitor_metric, mode=mode, patience=20)
+
+    trainer = pl.Trainer(
+        max_epochs=args.epochs,
+        accelerator="gpu",
+        devices=[0],
+        precision="16-mixed",
+        gradient_clip_val=1.0,
+        log_every_n_steps=20,
+        callbacks=[cb for cb in [ckpt_cb, early_cb] if cb is not None],
+        logger=False,
+        enable_progress_bar=True,
+    )
+
+    if args.ckpt_path is None:
+        trainer.fit(model, datamodule=dm)
+        test_results = trainer.test(model, datamodule=dm, ckpt_path="best")
+        print(f"Best ckpt: {ckpt_cb.best_model_path}")
+        print(f"Best score: {ckpt_cb.best_model_score}")
+    else:
+        model = ResNetClassifier.load_from_checkpoint(args.ckpt_path)
+
+        if args.temperature != 1.0:
+            model.temperature = torch.tensor(args.temperature, device=model.device)
+            print(f"Using manual temperature: {args.temperature}")
+
+        if model.is_binary:
+            model.hparams.conf_threshold = args.conf_threshold
+
+        if args.finetune:
+            model.hparams.lr = args.lr
+            model.hparams.weight_decay = args.weight_decay
+            model.hparams.label_smoothing = args.label_smoothing
+            model.hparams.T_max = args.epochs
+            model.hparams.batch_size = args.batch_size
+            model.hparams.freeze_backbone = args.freeze_backbone
+            model.hparams.backbone_lr_ratio = args.backbone_lr_ratio
+
+            print(f"Finetuning from checkpoint: {args.ckpt_path}")
+            model._apply_freezing_strategy()
+
+            trainer.fit(model, datamodule=dm)
+            test_results = trainer.test(model, datamodule=dm, ckpt_path='best')
+            print("Finetune completed.")
+            print(f"Best ckpt: {ckpt_cb.best_model_path}")
+            print(f"Best score: {ckpt_cb.best_model_score}")
+        else:
+            test_results = trainer.test(model, datamodule=dm)
+            print(f"Test completed from checkpoint {args.ckpt_path}")
+    
+    return test_results[0] if test_results else {}
+
+
 def main():
     pl.seed_everything(42)
 
@@ -197,11 +344,21 @@ def main():
     # Config file (optional)
     parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
 
+    # Cross-validation arguments
+    parser.add_argument("--cross_validation", action="store_true", 
+                        help="Enable cross-validation mode")
+    parser.add_argument("--fold_dir", type=str, default=None,
+                        help="Base directory containing fold_X subdirectories")
+    parser.add_argument("--fold", type=int, default=None,
+                        help="Specific fold to train (0-4), if None trains all folds")
+    parser.add_argument("--num_folds", type=int, default=5,
+                        help="Total number of folds (default: 5)")
+
     # Data arguments
     parser.add_argument("--train_csv", type=str, default=None)
     parser.add_argument("--val_csv", type=str, default=None)
     parser.add_argument("--test_csv", type=str, default=None)
-    parser.add_argument("--root", type=str, default="")
+    parser.add_argument("--spectrograms_root", type=str, default="")
     parser.add_argument("--x_col", type=str, default="spec_name")
     parser.add_argument("--target_size", type=int, nargs=2, default=[224, 469])
 
@@ -267,111 +424,55 @@ def main():
             args.epochs = cfg.training.epochs
         if args.backbone == "resnet18":
             args.backbone = cfg.training.backbone
+        if args.spectrograms_root == "":
+            args.spectrograms_root = cfg.paths.spectrograms_dir
 
-    # Create DataModule config
-    dm_cfg = DataModuleConfig(
-        train_csv=args.train_csv,
-        val_csv=args.val_csv,
-        test_csv=args.test_csv,
-        root=args.root,
-        x_col=args.x_col,
-        target_size=args.target_size,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        use_specaug=args.use_specaug,
-        normalize=args.normalize,
-        pcen=args.pcen,
-        num_classes=args.num_classes if args.num_classes != 2 else None,
-        use_mixup=(args.num_classes == 2),
-        mixup_prob=args.mixup_prob,
-        mixup_alpha=args.mixup_alpha,
-    )
-
-    dm = SpectrogramDataModule(dm_cfg)
-    dm.setup()
-
-    num_classes = args.num_classes if args.num_classes != 2 else dm.num_classes
-
-    model = ResNetClassifier(
-        num_classes=num_classes,
-        in_channels=dm.in_channels,
-        backbone=args.backbone,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        label_smoothing=args.label_smoothing,
-        T_max=args.epochs,
-        batch_size=args.batch_size,
-        pos_weight=args.pos_weight,
-        conf_threshold=args.conf_threshold,
-        freeze_backbone=args.freeze_backbone,
-        backbone_lr_ratio=args.backbone_lr_ratio,
-        class_names=args.class_names,
-    )
-
-    print(f"\nClassification mode: {'Binary' if num_classes == 2 else f'Multiclass ({num_classes} classes)'}")
-    print(summary(model, input_size=(args.batch_size, dm.in_channels, *args.target_size)))
-
-    # Callbacks & logging
-    mode = "min" if args.monitor_metric == "val/loss" else "max"
-
-    ckpt_cb = ModelCheckpoint(
-        monitor=args.monitor_metric,
-        mode=mode,
-        save_top_k=1,
-        save_last=True,
-        filename="resnet-finetune-{epoch:02d}" if args.finetune else "resnet-{epoch:02d}",
-    )
-
-    early_cb = None
-    if not args.finetune:
-        early_cb = EarlyStopping(monitor=args.monitor_metric, mode=mode, patience=20)
-
-    trainer = pl.Trainer(
-        max_epochs=args.epochs,
-        accelerator="gpu",
-        devices=[0],
-        precision="16-mixed",
-        gradient_clip_val=1.0,
-        log_every_n_steps=20,
-        callbacks=[cb for cb in [ckpt_cb, early_cb] if cb is not None],
-        logger=False,
-    )
-
-    if args.ckpt_path is None:
-        trainer.fit(model, datamodule=dm)
-        trainer.test(model, datamodule=dm, ckpt_path="best")
-        print("Best ckpt:", ckpt_cb.best_model_path)
-        print("Best score:", ckpt_cb.best_model_score)
-    else:
-        model = ResNetClassifier.load_from_checkpoint(args.ckpt_path)
-
-        if args.temperature != 1.0:
-            model.temperature = torch.tensor(args.temperature, device=model.device)
-            print(f"Using manual temperature: {args.temperature}")
-
-        if model.is_binary:
-            model.hparams.conf_threshold = args.conf_threshold
-
-        if args.finetune:
-            model.hparams.lr = args.lr
-            model.hparams.weight_decay = args.weight_decay
-            model.hparams.label_smoothing = args.label_smoothing
-            model.hparams.T_max = args.epochs
-            model.hparams.batch_size = args.batch_size
-            model.hparams.freeze_backbone = args.freeze_backbone
-            model.hparams.backbone_lr_ratio = args.backbone_lr_ratio
-
-            print(f"Finetuning from checkpoint: {args.ckpt_path}")
-            model._apply_freezing_strategy()
-
-            trainer.fit(model, datamodule=dm)
-            trainer.test(model, datamodule=dm, ckpt_path='best')
-            print("Finetune completed.")
-            print("Best ckpt:", ckpt_cb.best_model_path)
-            print("Best score:", ckpt_cb.best_model_score)
+    # Cross-validation mode
+    if args.cross_validation:
+        if not args.fold_dir:
+            raise ValueError("--fold_dir must be specified when using --cross_validation")
+        
+        fold_dirs = sorted([d for d in os.listdir(args.fold_dir) if d.startswith('fold_')])
+        
+        if args.fold is not None:
+            # Train on specific fold
+            if args.fold >= len(fold_dirs):
+                raise ValueError(f"Fold {args.fold} not found. Available folds: 0-{len(fold_dirs)-1}")
+            results = train_single_fold(args, fold_num=args.fold)
+            print(f"\nFold {args.fold} Results:")
+            for key, value in results.items():
+                print(f"  {key}: {value:.4f}")
         else:
-            trainer.test(model, datamodule=dm)
-            print(f"Test completed from checkpoint {args.ckpt_path}")
+            # Train on all folds
+            all_results = []
+            for fold_num in range(len(fold_dirs)):
+                results = train_single_fold(args, fold_num=fold_num)
+                all_results.append(results)
+            
+            # Aggregate results
+            print(f"\n{'='*60}")
+            print("CROSS-VALIDATION SUMMARY")
+            print(f"{'='*60}\n")
+            
+            if all_results:
+                metrics = list(all_results[0].keys())
+                print(f"{'Metric':<30} {'Mean':<12} {'Std':<12}")
+                print("-" * 60)
+                
+                for metric in metrics:
+                    values = [r[metric] for r in all_results]
+                    mean_val = np.mean(values)
+                    std_val = np.std(values)
+                    print(f"{metric:<30} {mean_val:<12.4f} {std_val:<12.4f}")
+                
+                print("\nPer-Fold Results:")
+                for fold_num, results in enumerate(all_results):
+                    print(f"\n  Fold {fold_num}:")
+                    for key, value in results.items():
+                        print(f"    {key}: {value:.4f}")
+    else:
+        # Standard single training run
+        results = train_single_fold(args, fold_num=None)
 
 
 if __name__ == "__main__":

@@ -62,11 +62,10 @@ python prepare_dataset.py --config config.yaml --steps windows spectrograms
 ### 6. Train Model
 
 ```bash
-# Binary classification
 python train.py --config config.yaml \
     --train_csv train_split.csv \
     --val_csv val_split.csv \
-    --test_csv test_split.csv
+    --test_csv test_split.csv \
 ```
 
 ### 7. Run Inference
@@ -74,6 +73,6 @@ python train.py --config config.yaml \
 ```bash
 python inference.py --config config.yaml \
     --checkpoint model.ckpt \
-    --audios_source /path/to/audio/folder \
+    --audios_source data/audios_48khz/ \
     --dataset my_inference
 ```
