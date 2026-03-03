@@ -68,11 +68,10 @@ python train.py --config config.yaml \
     --test_csv test_split.csv \
 ```
 
-### 7. Run Inference
+### 7. Test Model
 
 ```bash
-python inference.py --config config.yaml \
-    --checkpoint model.ckpt \
-    --audios_source data/audios_48khz/ \
-    --dataset my_inference
+python train.py --config config.yaml \
+    --ckpt_path checkpoint.ckpt \
+    --test_csv test_split.csv \
 ```
