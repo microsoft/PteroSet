@@ -137,7 +137,7 @@ def run_windows(config: DomainConfig) -> List[dict]:
 def run_spectrograms(config: DomainConfig, windows: List[dict]) -> None:
     """Compute mel spectrograms using GPU."""
     # Import here to avoid loading torch unnecessarily
-    from inference import compute_mel_spectrograms_gpu
+    from PytorchWildlife.data.bioacoustics_spectrograms import compute_mel_spectrograms_gpu
 
     print(f"\n{'='*60}")
     print(f"Step: Compute Mel Spectrograms (GPU)")

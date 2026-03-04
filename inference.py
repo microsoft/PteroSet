@@ -44,6 +44,7 @@ import soundfile as sf
 from PytorchWildlife.models.bioacoustics import ResNetClassifier
 from PytorchWildlife.data.bioacoustics_datasets import ResizeTo, PerSampleNormalize
 from PytorchWildlife.utils.bioacoustics_configs import load_config
+from PytorchWildlife.data.bioacoustics_spectrograms import compute_mel_spectrograms_gpu
 
 
 class BioacousticsInferenceDataset(Dataset):
@@ -167,137 +168,6 @@ def build_inference_windows(
             window_idx += 1
 
     return windows
-
-
-def compute_mel_spectrograms_gpu(
-    windows: List[Dict],
-    sample_rate: int,
-    n_fft: int,
-    hop_length: Optional[int],
-    n_mels: int,
-    top_db: float,
-    spectrograms_path: str,
-    save_npy: bool = True,
-    fill_highfreq: bool = True,
-    noise_db_mean: Optional[float] = None,
-    noise_db_std: float = 3.0,
-    storage_dtype: str = "float32",
-) -> None:
-    """
-    GPU-accelerated mel spectrogram computation.
-    """
-    if hop_length is None:
-        hop_length = n_fft // 4
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.set_grad_enabled(False)
-    if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
-
-    Path(spectrograms_path).mkdir(parents=True, exist_ok=True)
-
-    # Group windows by sound_path
-    by_sid = defaultdict(list)
-    for idx, win in enumerate(windows):
-        by_sid[win["sound_path"]].append((idx, win))
-
-    # Check for existing spectrograms
-    files_to_process = {}
-    total_windows = 0
-    existing_windows = 0
-
-    print("Checking for existing spectrograms...")
-    for audio_file_path, items in tqdm(by_sid.items(), desc="Checking files"):
-        missing_items = []
-        for idx, win in items:
-            npy_path = os.path.join(spectrograms_path, spectrogram_filename(win["sound_path"], win['start'], win['end']))
-            total_windows += 1
-
-            if not os.path.exists(npy_path):
-                missing_items.append((idx, win))
-            else:
-                existing_windows += 1
-
-        if missing_items:
-            files_to_process[audio_file_path] = missing_items
-
-    print(f"Found {existing_windows}/{total_windows} existing spectrograms")
-    print(f"Need to create {total_windows - existing_windows} spectrograms from {len(files_to_process)} audio files")
-
-    if len(files_to_process) == 0:
-        print("All spectrograms already exist! Skipping computation.")
-        return
-
-    for audio_file_path, items in tqdm(files_to_process.items(), desc="Processing files"):
-        # Decode on CPU
-        y, orig_sr = sf.read(audio_file_path, dtype="float32", always_2d=False)
-        if y.ndim == 2:
-            y = y.mean(axis=1)
-        wav_cpu = torch.from_numpy(y).unsqueeze(0)
-
-        # Resample if needed
-        if orig_sr != sample_rate:
-            wav_cpu = torchaudio.functional.resample(wav_cpu, orig_freq=orig_sr, new_freq=sample_rate)
-
-        # Mel transform on GPU
-        mel_tf = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            n_mels=n_mels,
-            f_min=0.0,
-            f_max=sample_rate / 2.0,
-            power=2.0,
-            center=False,
-            norm="slaney",
-            mel_scale="slaney",
-        ).to(device)
-
-        to_db = torchaudio.transforms.AmplitudeToDB(
-            stype="power", top_db=top_db
-        ).to(device)
-
-        for global_idx, win in tqdm(items):
-            start = int(win["start"])
-            end = int(win["end"])
-            npy_path = os.path.join(spectrograms_path, spectrogram_filename(win["sound_path"], start, end))
-
-            if not os.path.exists(npy_path):
-                wav_win = wav_cpu[:, start:end].to(device)
-                S = mel_tf(wav_win).squeeze(0)
-                S_db = to_db(S)
-
-                # Optional high-frequency fill
-                if fill_highfreq and orig_sr < sample_rate:
-                    mel_freqs = librosa.mel_frequencies(n_mels=n_mels, fmin=0.0, fmax=sample_rate / 2.0)
-                    nyq_orig = (float(orig_sr) / 2.0) - 2500
-                    noise_mask = torch.from_numpy((mel_freqs > nyq_orig).astype(np.bool_)).to(device)
-                    if noise_mask.any():
-                        valid_mask = ~noise_mask
-                        if noise_db_mean is None:
-                            vals = S_db[valid_mask, :].reshape(-1)
-                            if vals.numel() == 0:
-                                mu = -60.0
-                            else:
-                                v = vals.float().cpu()
-                                k = max(1, int(math.ceil(0.10 * v.numel())))
-                                mu = torch.kthvalue(v, k).values.item()
-                        else:
-                            mu = float(noise_db_mean)
-
-                        S_db[noise_mask, :] = mu
-                        S_db = torch.clamp(S_db, min=-top_db, max=20.0)
-
-                if save_npy:
-                    arr = S_db.detach().to("cpu").numpy()
-                    if storage_dtype == "float16":
-                        arr = arr.astype("float16", copy=False)
-                    elif storage_dtype == "float32":
-                        arr = arr.astype("float32", copy=False)
-                    np.save(npy_path, arr)
-
-                del wav_win, S, S_db
-                torch.cuda.empty_cache()
 
 
 def load_model_from_checkpoint(checkpoint_path: str, device: str = "cuda") -> ResNetClassifier:
