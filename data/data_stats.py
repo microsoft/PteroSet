@@ -36,6 +36,23 @@ HOP_LENGTH = 512
 N_MELS = 224
 FMAX = SR / 2  # 24 kHz
 
+# ── Mel-scale display helpers ────────────────────────────────────────────
+# Precomputed mel tick values for consistent y-axis across all plots
+_MEL_FREQ_TICKS_HZ = np.array([0, 1000, 2000, 4000, 8000, 16000, 24000])
+_MEL_FREQ_TICKS_HZ = _MEL_FREQ_TICKS_HZ[_MEL_FREQ_TICKS_HZ <= FMAX]
+_MEL_TICK_LABELS = [f"{int(f/1000)}k" if f >= 1000 else str(int(f)) for f in _MEL_FREQ_TICKS_HZ]
+
+
+def _hz_to_mel_bin(freq_hz, max_freq_hz, n_mels):
+    """Convert a frequency in Hz to a mel-scale bin position."""
+    mel = 2595.0 * np.log10(1.0 + freq_hz / 700.0)
+    mel_max = 2595.0 * np.log10(1.0 + max_freq_hz / 700.0)
+    return mel / mel_max * n_mels
+
+
+# Precomputed tick positions in mel-bin space
+_MEL_TICK_POSITIONS = np.array([_hz_to_mel_bin(f, FMAX, N_MELS) for f in _MEL_FREQ_TICKS_HZ])
+
 
 def load_annotations():
     with open(ANNOTATIONS_PATH, "r") as f:
@@ -264,6 +281,10 @@ def plot_annotation_scenarios(annotations=None, categories=None, sounds=None):
         win_start_sec = start_sample / SR
         win_end_sec = end_sample / SR
         
+        # Skip windows that cross a 10-second segment boundary
+        if int(win_start_sec // 10) != int((win_end_sec - 1e-9) // 10):
+            continue
+        
         # Find annotations that overlap this window
         overlapping_anns = []
         for ann in annotations:
@@ -398,24 +419,34 @@ def plot_annotation_scenarios(annotations=None, categories=None, sounds=None):
         
         win_start_sec = info['start_sample'] / SR
         win_end_sec = info['end_sample'] / SR
-        
-        librosa.display.specshow(
-            spec, sr=SR, hop_length=HOP_LENGTH,
-            x_axis='time', y_axis='mel',
-            fmax=FMAX, cmap='magma', ax=ax
-        )
+        duration_sec = win_end_sec - win_start_sec
+        n_time_frames = spec.shape[-1]
+
+        ax.imshow(spec, aspect='auto', origin='lower', cmap='magma')
+
+        # X-axis: time in seconds
+        time_ticks_sec = np.arange(0, duration_sec + 0.5, 1.0)
+        time_tick_positions = time_ticks_sec / duration_sec * n_time_frames
+        ax.set_xticks(time_tick_positions)
+        ax.set_xticklabels([f"{t:.0f}" for t in time_ticks_sec], fontsize=7)
+
+        # Y-axis: mel-scale frequency ticks
+        ax.set_yticks(_MEL_TICK_POSITIONS)
+        ax.set_yticklabels(_MEL_TICK_LABELS, fontsize=7)
         
         # Draw all annotations for this window
         for ann in info['annotations']:
             t_min, t_max = ann['t_min'], ann['t_max']
             f_min, f_max = ann['f_min'], ann['f_max']
             
-            # Convert to relative coordinates
-            rect_t_min = t_min - win_start_sec
-            rect_t_max = t_max - win_start_sec
+            # Convert to relative coordinates in frame / mel-bin space
+            rect_t_min = (t_min - win_start_sec) / duration_sec * n_time_frames
+            rect_t_max = (t_max - win_start_sec) / duration_sec * n_time_frames
+            y0 = _hz_to_mel_bin(f_min, FMAX, N_MELS)
+            y1 = _hz_to_mel_bin(f_max, FMAX, N_MELS)
             
             rect = Rectangle(
-                (rect_t_min, f_min), rect_t_max - rect_t_min, f_max - f_min,
+                (rect_t_min, y0), rect_t_max - rect_t_min, y1 - y0,
                 linewidth=1.5, edgecolor="cyan", facecolor="none", linestyle="--",
             )
             ax.add_patch(rect)
@@ -588,6 +619,19 @@ def plot_audios_by_project_time_of_day(annotations=None, categories=None, sounds
     categories = {c["id"]: c for c in data["categories"]}
     sounds = {s["id"]: s for s in data["sounds"]}
     annotations = data["annotations"]
+
+    # Try loading species-level annotations for color-coded boxes
+    species_annotations_path = os.path.join(ROOT, "annotations_species.json")
+    species_by_coords = {}
+    species_categories = {}
+    if os.path.exists(species_annotations_path):
+        with open(species_annotations_path, 'r') as f:
+            species_data = json.load(f)
+        species_categories = {c["id"]: c for c in species_data["categories"]}
+        for ann in species_data["annotations"]:
+            key = (ann["sound_id"], round(ann["t_min"], 6), round(ann["t_max"], 6),
+                   round(ann["f_min"], 1), round(ann["f_max"], 1))
+            species_by_coords[key] = ann
     
     print(f"Loaded {len(annotations)} annotations from annotations_identification.json")
     
@@ -650,7 +694,7 @@ def plot_audios_by_project_time_of_day(annotations=None, categories=None, sounds
     
     # Create subplots
     n_projects = len(sorted_projects)
-    fig, axes = plt.subplots(n_projects, 1, figsize=(16, 3 * n_projects), sharex=True)
+    fig, axes = plt.subplots(n_projects, 1, figsize=(16, 3 * n_projects))
     
     if n_projects == 1:
         axes = [axes]
@@ -708,26 +752,64 @@ def plot_audios_by_project_time_of_day(annotations=None, categories=None, sounds
             # Get annotations for this sound
             sound_annotations = [ann for ann in annotations if ann['sound_id'] == sound_id]
             
-            # Plot spectrogram with librosa (same style as complete_audio)
-            librosa.display.specshow(
-                mel_spec_db, sr=SR, hop_length=HOP_LENGTH,
-                x_axis='time', y_axis='mel',
-                fmax=FMAX, cmap='magma', ax=ax
-            )
-            
-            # Overlay annotations (in seconds to match spectrogram coordinates)
+            # Plot spectrogram with imshow (proper mel-bin y-axis)
+            n_time_frames = mel_spec_db.shape[1]
+            ax.imshow(mel_spec_db, aspect='auto', origin='lower', cmap='magma')
+
+            # Y-axis: mel-scale frequency ticks
+            ax.set_yticks(_MEL_TICK_POSITIONS)
+            ax.set_yticklabels(_MEL_TICK_LABELS, fontsize=7)
+
+            # X-axis: map frame indices to audio seconds for time-of-day formatting
+            audio_dur = len(audio) / SR
+            tick_secs = [t for t in range(0, 481, 10) if t <= audio_dur]
+            x_tick_positions = [t / audio_dur * n_time_frames for t in tick_secs]
+            ax.set_xticks(x_tick_positions)
+            ax.set_xlim(0, n_time_frames)
+            if idx == n_projects - 1:
+                ax.set_xticklabels([format_time_of_day(t) for t in tick_secs],
+                                   fontsize=8, rotation=45, ha='right')
+                ax.set_xlabel("Time of Day", fontsize=11, fontweight='bold')
+            else:
+                ax.set_xticklabels([])
+
+            # Build species color map for this sound
+            species_in_sound = set()
+            if species_by_coords:
+                for ann in sound_annotations:
+                    key = (ann["sound_id"], round(ann["t_min"], 6), round(ann["t_max"], 6),
+                           round(ann["f_min"], 1), round(ann["f_max"], 1))
+                    sp_ann = species_by_coords.get(key)
+                    if sp_ann:
+                        species_in_sound.add(sp_ann['category_id'])
+            species_list = sorted(species_in_sound)
+            cmap_tab = plt.cm.get_cmap('tab20', max(len(species_list), 1))
+            species_color = {sid: cmap_tab(i) for i, sid in enumerate(species_list)}
+
+            # Overlay annotations (converted to frame / mel-bin coordinates)
             for ann in sound_annotations:
-                t_min_audio = ann['t_min']  # Time in audio seconds
+                t_min_audio = ann['t_min']
                 t_max_audio = ann['t_max']
                 f_min, f_max = ann['f_min'], ann['f_max']
-                
-                # Keep coordinates in seconds (matching spectrogram)
+
+                x0 = t_min_audio / audio_dur * n_time_frames
+                x1 = t_max_audio / audio_dur * n_time_frames
+                y0 = _hz_to_mel_bin(f_min, FMAX, N_MELS)
+                y1 = _hz_to_mel_bin(f_max, FMAX, N_MELS)
+
+                color = "cyan"
+                key = (ann["sound_id"], round(ann["t_min"], 6), round(ann["t_max"], 6),
+                       round(ann["f_min"], 1), round(ann["f_max"], 1))
+                sp_ann = species_by_coords.get(key)
+                if sp_ann and sp_ann['category_id'] in species_color:
+                    color = species_color[sp_ann['category_id']]
+
                 rect = Rectangle(
-                    (t_min_audio, f_min), t_max_audio - t_min_audio, f_max - f_min,
-                    linewidth=1.0, edgecolor="cyan", facecolor="none", linestyle="--", alpha=0.8
+                    (x0, y0), x1 - x0, y1 - y0,
+                    linewidth=1.0, edgecolor=color, facecolor="none", linestyle="--", alpha=0.8
                 )
                 ax.add_patch(rect)
-            
+
             # Format axes
             ax.set_ylabel(f"{project}\nFrequency (Hz)", fontsize=9, fontweight='bold')
             ax.set_title(f"{audio_name} | {len(sound_annotations)} annotations", 
@@ -738,27 +820,191 @@ def plot_audios_by_project_time_of_day(annotations=None, categories=None, sounds
                    ha='center', va='center', transform=ax.transAxes)
             ax.set_ylabel(f"{project}", fontsize=10, fontweight='bold')
     
-    # Set shared x-axis with time of day labels
-    # Audio is 480 seconds representing 24 hours (each second = 3 minutes)
-    axes[-1].set_xlabel("Time of Day", fontsize=11, fontweight='bold')
-    
-    # Set x-axis limits and ticks for all axes
-    tick_positions = list(range(0, 481, 10))  # 0, 10, 20, ..., 480 seconds (every 30 min)
-    
-    for ax in axes:
-        ax.set_xlim(0, 480)
-        ax.set_xticks(tick_positions)
-        ax.xaxis.set_major_formatter(FuncFormatter(format_time_of_day))
-    
-    # Rotate labels for readability (only on bottom axis)
-    plt.setp(axes[-1].xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
-    
     fig.suptitle("Audio Spectrograms by Project - Time of Day (10s every 30 min)", 
                  fontsize=13, fontweight='bold')
     plt.tight_layout()
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Saved project audio plots to {out}")
+
+
+def plot_most_annotated_audio_time_of_day():
+    """Plot the single audio with the most annotations, with time-of-day x-axis.
+
+    Same layout as :func:`plot_audios_by_project_time_of_day` but limited to the
+    audio file that has the highest number of annotations across the whole dataset.
+
+    Uses annotations_identification.json for annotations.
+    """
+    import librosa
+    import soundfile as sf
+    from matplotlib.patches import Rectangle
+    from matplotlib.ticker import FuncFormatter
+    import pandas as pd
+
+    out = os.path.join(OUTPUT_DIR, "most_annotated_audio_time_of_day.png")
+
+    if os.path.exists(out):
+        print(f"Skipping most-annotated audio plot (already exists): {out}")
+        return
+
+    # Load annotations_identification.json
+    annotations_id_path = os.path.join(ROOT, "annotations_identification.json")
+    if not os.path.exists(annotations_id_path):
+        print(f"Annotations identification file not found: {annotations_id_path}")
+        return
+
+    with open(annotations_id_path, 'r') as f:
+        data = json.load(f)
+
+    sounds = {s["id"]: s for s in data["sounds"]}
+    annotations = data["annotations"]
+
+    # Try loading species-level annotations for color-coded boxes
+    species_annotations_path = os.path.join(ROOT, "annotations_species.json")
+    species_by_coords = {}
+    species_categories = {}
+    if os.path.exists(species_annotations_path):
+        with open(species_annotations_path, 'r') as f:
+            species_data = json.load(f)
+        species_categories = {c["id"]: c for c in species_data["categories"]}
+        for ann in species_data["annotations"]:
+            key = (ann["sound_id"], round(ann["t_min"], 6), round(ann["t_max"], 6),
+                   round(ann["f_min"], 1), round(ann["f_max"], 1))
+            species_by_coords[key] = ann
+
+    # Find the sound with the most annotations
+    ann_counts = Counter(ann['sound_id'] for ann in annotations)
+    if not ann_counts:
+        print("No annotations found")
+        return
+
+    best_sound_id, n_anns = ann_counts.most_common(1)[0]
+    sound = sounds[best_sound_id]
+    audio_name = os.path.basename(sound['file_name_path'])
+    print(f"Most annotated audio: {audio_name} ({n_anns} annotations)")
+
+    # Resolve audio path
+    audio_path = sound['file_name_path']
+    if not os.path.isabs(audio_path):
+        if audio_path.startswith('data/'):
+            audio_path = os.path.join(ROOT, audio_path[5:])
+        else:
+            audio_path = os.path.join(ROOT, audio_path)
+
+    if not os.path.exists(audio_path):
+        print(f"Audio file not found: {audio_path}")
+        return
+
+    # Conversion helpers
+    def audio_seconds_to_hours(t_seconds):
+        return t_seconds * 3.0 / 60.0
+
+    def format_time_of_day(seconds, pos=None):
+        hours_float = audio_seconds_to_hours(seconds)
+        hours = int(hours_float)
+        mins = int((hours_float % 1) * 60)
+        return f"{hours:02d}:{mins:02d}"
+
+    # Load and process audio
+    try:
+        audio, sr = sf.read(audio_path)
+        if len(audio.shape) > 1:
+            audio = audio[:, 0]
+
+        if sr != SR:
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=SR)
+
+        mel_spec = librosa.feature.melspectrogram(
+            y=audio, sr=SR, n_fft=2048, hop_length=HOP_LENGTH,
+            n_mels=N_MELS, fmax=FMAX
+        )
+        mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+
+        sound_annotations = [ann for ann in annotations if ann['sound_id'] == best_sound_id]
+
+        fig, ax = plt.subplots(1, 1, figsize=(16, 4))
+
+        n_time_frames = mel_spec_db.shape[1]
+        ax.imshow(mel_spec_db, aspect='auto', origin='lower', cmap='magma')
+
+        # Y-axis: mel-scale frequency ticks
+        ax.set_yticks(_MEL_TICK_POSITIONS)
+        ax.set_yticklabels(_MEL_TICK_LABELS, fontsize=7)
+
+        # Overlay annotations (converted to frame / mel-bin coordinates)
+        # Build species color map if species annotations are available
+        species_in_sound = set()
+        if species_by_coords:
+            for ann in sound_annotations:
+                key = (ann["sound_id"], round(ann["t_min"], 6), round(ann["t_max"], 6),
+                       round(ann["f_min"], 1), round(ann["f_max"], 1))
+                sp_ann = species_by_coords.get(key)
+                if sp_ann:
+                    species_in_sound.add(sp_ann['category_id'])
+        species_list = sorted(species_in_sound)
+        cmap_tab = plt.cm.get_cmap('tab20', max(len(species_list), 1))
+        species_color = {sid: cmap_tab(i) for i, sid in enumerate(species_list)}
+
+        audio_duration = len(audio) / SR
+        legend_handles = {}
+        for ann in sound_annotations:
+            t_min_audio = ann['t_min']
+            t_max_audio = ann['t_max']
+            f_min, f_max = ann['f_min'], ann['f_max']
+
+            x0 = t_min_audio / audio_duration * n_time_frames
+            x1 = t_max_audio / audio_duration * n_time_frames
+            y0 = _hz_to_mel_bin(f_min, FMAX, N_MELS)
+            y1 = _hz_to_mel_bin(f_max, FMAX, N_MELS)
+
+            # Determine color from species annotation
+            color = "cyan"
+            label = "No species"
+            key = (ann["sound_id"], round(ann["t_min"], 6), round(ann["t_max"], 6),
+                   round(ann["f_min"], 1), round(ann["f_max"], 1))
+            sp_ann = species_by_coords.get(key)
+            if sp_ann and sp_ann['category_id'] in species_color:
+                cat = species_categories[sp_ann['category_id']]
+                color = species_color[sp_ann['category_id']]
+                label = cat['name']
+
+            rect = Rectangle(
+                (x0, y0), x1 - x0, y1 - y0,
+                linewidth=1.0, edgecolor=color, facecolor="none", linestyle="--", alpha=0.8
+            )
+            ax.add_patch(rect)
+            if label not in legend_handles:
+                legend_handles[label] = rect
+
+        ax.set_ylabel("Frequency (Hz)", fontsize=10, fontweight='bold')
+        ax.set_xlabel("Time of Day", fontsize=11, fontweight='bold')
+
+        tick_secs = [t for t in range(0, 481, 10) if t <= audio_duration]
+        x_tick_positions = [t / audio_duration * n_time_frames for t in tick_secs]
+        ax.set_xticks(x_tick_positions)
+        ax.set_xticklabels([format_time_of_day(t) for t in tick_secs], fontsize=8,
+                           rotation=45, ha='right')
+        ax.set_xlim(0, n_time_frames)
+
+        # Add species legend
+        if legend_handles:
+            ax.legend(legend_handles.values(), legend_handles.keys(),
+                      loc='upper right', fontsize=6, ncol=2, framealpha=0.7)
+
+        fig.suptitle(
+            f"Audio and Annotations Example - {audio_name} ({n_anns} annotations)\n"
+            f"Time of Day (10s every 30 min)",
+            fontsize=13, fontweight='bold'
+        )
+
+        plt.tight_layout()
+        plt.savefig(out, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Saved most-annotated audio plot to {out}")
+
+    except Exception as e:
+        print(f"Error processing audio {audio_name}: {e}")
 
 
 def print_data_statistics():
@@ -797,6 +1043,13 @@ def print_data_statistics():
     print(f"  Mean duration: {np.mean(durations):.2f} seconds ({np.mean(durations)/60:.2f} minutes)")
     print(f"  Std duration:  {np.std(durations):.2f} seconds ({np.std(durations)/60:.2f} minutes)")
     print(f"  Total duration: {np.sum(durations):.2f} seconds ({np.sum(durations)/3600:.2f} hours)")
+    print()
+    
+    # Unique audio durations and counts
+    duration_counts = Counter(round(d, 2) for d in durations)
+    print("  Unique audio durations (seconds) and counts:")
+    for dur in sorted(duration_counts):
+        print(f"    {dur:.2f}s ({dur/60:.2f} min): {duration_counts[dur]} audios")
     print()
     
     # ── 2. AUDIOS PER PROJECT ──
@@ -1068,7 +1321,7 @@ def plot_statistics_by_project(projects, project_stats):
     num_audios = [project_stats[proj]['num_audios'] for proj in projects]
     colors = plt.cm.magma(np.linspace(0.2, 0.85, num_projects))
     bars = ax1.barh(projects, num_audios, color=colors)
-    ax1.set_xlabel('Number of Audios', fontsize=12, fontweight='bold')
+    ax1.set_xlabel('Number of Audios', fontsize=12)
     ax1.set_title('Number of Audios per Project', fontsize=13, fontweight='bold')
     ax1.tick_params(axis='both', labelsize=10)
     ax1.invert_yaxis()
@@ -1080,7 +1333,7 @@ def plot_statistics_by_project(projects, project_stats):
     ax2 = fig.add_subplot(gs[0, 1])
     total_durations = [np.sum(project_stats[proj]['audio_durations'])/3600 for proj in projects]
     bars = ax2.barh(projects, total_durations, color=colors)
-    ax2.set_xlabel('Total Duration (hours)', fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Total Duration (hours)', fontsize=12)
     ax2.set_title('Total Audio Duration per Project', fontsize=13, fontweight='bold')
     ax2.tick_params(axis='both', labelsize=10)
     ax2.invert_yaxis()
@@ -1088,50 +1341,50 @@ def plot_statistics_by_project(projects, project_stats):
         ax2.text(bar.get_width() + max(total_durations)*0.01, bar.get_y() + bar.get_height()/2, 
                  f'{val:.2f}h', va='center', fontsize=10)
     
-    # 3. Number of species-level annotations per project
+    # 3. Mean annotation duration (identification level)
     ax3 = fig.add_subplot(gs[1, 0])
-    num_anns_species = [project_stats[proj]['num_anns_species'] for proj in projects]
-    bars = ax3.barh(projects, num_anns_species, color=colors)
-    ax3.set_xlabel('Number of Annotations', fontsize=12, fontweight='bold')
-    ax3.set_title('Species-Level Annotations per Project', fontsize=13, fontweight='bold')
+    total_ann_dur_id = [np.sum(project_stats[proj]['ann_durations_identification']) / 3600
+                       if project_stats[proj]['ann_durations_identification'] else 0 
+                       for proj in projects]
+    bars = ax3.barh(projects, total_ann_dur_id, color=colors)
+    ax3.set_xlabel('Total Annotated Duration (hours)', fontsize=12)
+    ax3.set_title('Total Annotated Duration by Project', fontsize=13, fontweight='bold')
     ax3.tick_params(axis='both', labelsize=10)
     ax3.invert_yaxis()
-    for bar, val in zip(bars, num_anns_species):
-        ax3.text(bar.get_width() + max(num_anns_species)*0.01, bar.get_y() + bar.get_height()/2, 
-                 str(val), va='center', fontsize=10)
+    for bar, val in zip(bars, total_ann_dur_id):
+        ax3.text(bar.get_width() + max(total_ann_dur_id)*0.01, bar.get_y() + bar.get_height()/2, 
+                 f'{val:.2f}h', va='center', fontsize=10)
     
     # 4. Number of identification-level annotations per project
     ax4 = fig.add_subplot(gs[1, 1])
     num_anns_id = [project_stats[proj]['num_anns_identification'] for proj in projects]
     bars = ax4.barh(projects, num_anns_id, color=colors)
-    ax4.set_xlabel('Number of Annotations', fontsize=12, fontweight='bold')
-    ax4.set_title('Identification-Level Annotations per Project', fontsize=13, fontweight='bold')
+    ax4.set_xlabel('Number of Annotations', fontsize=12)
+    ax4.set_title('Class-Level Annotations per Project', fontsize=13, fontweight='bold')
     ax4.tick_params(axis='both', labelsize=10)
     ax4.invert_yaxis()
     for bar, val in zip(bars, num_anns_id):
         ax4.text(bar.get_width() + max(num_anns_id)*0.01, bar.get_y() + bar.get_height()/2, 
                  str(val), va='center', fontsize=10)
     
-    # 5. Mean annotation duration (identification level)
+    # 5. Number of species-level annotations per project
     ax5 = fig.add_subplot(gs[2, 0])
-    mean_ann_dur_id = [np.mean(project_stats[proj]['ann_durations_identification']) 
-                       if project_stats[proj]['ann_durations_identification'] else 0 
-                       for proj in projects]
-    bars = ax5.barh(projects, mean_ann_dur_id, color=colors)
-    ax5.set_xlabel('Mean Duration (seconds)', fontsize=12, fontweight='bold')
-    ax5.set_title('Mean Annotation Duration by Project', fontsize=13, fontweight='bold')
+    num_anns_species = [project_stats[proj]['num_anns_species'] for proj in projects]
+    bars = ax5.barh(projects, num_anns_species, color=colors)
+    ax5.set_xlabel('Number of Annotations', fontsize=12)
+    ax5.set_title('Species-Level Annotations per Project', fontsize=13, fontweight='bold')
     ax5.tick_params(axis='both', labelsize=10)
     ax5.invert_yaxis()
-    for bar, val in zip(bars, mean_ann_dur_id):
-        ax5.text(bar.get_width() + max(mean_ann_dur_id)*0.01, bar.get_y() + bar.get_height()/2, 
-                 f'{val:.2f}s', va='center', fontsize=10)
+    for bar, val in zip(bars, num_anns_species):
+        ax5.text(bar.get_width() + max(num_anns_species)*0.01, bar.get_y() + bar.get_height()/2, 
+                 str(val), va='center', fontsize=10)
     
     # 6. Number of unique species per project
     ax6 = fig.add_subplot(gs[2, 1])
     num_species = [len(project_stats[proj]['species_set']) for proj in projects]
     bars = ax6.barh(projects, num_species, color=colors)
-    ax6.set_xlabel('Number of Unique Species', fontsize=12, fontweight='bold')
-    ax6.set_title('Species Diversity per Project', fontsize=13, fontweight='bold')
+    ax6.set_xlabel('Number of Unique Species', fontsize=12)
+    ax6.set_title('Species Diversity Identified per Project', fontsize=13, fontweight='bold')
     ax6.tick_params(axis='both', labelsize=10)
     ax6.invert_yaxis()
     for bar, val in zip(bars, num_species):
@@ -1166,6 +1419,7 @@ def main():
     plot_annotation_scenarios()  # Uses annotations_identification.json internally
     plot_complete_audio(annotations, categories, sounds)
     plot_audios_by_project_time_of_day()  # Uses annotations_identification.json internally
+    plot_most_annotated_audio_time_of_day()  # Single audio with most annotations
 
 
 if __name__ == "__main__":

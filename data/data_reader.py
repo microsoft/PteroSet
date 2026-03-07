@@ -1,4 +1,4 @@
-from PytorchWildlife.data.annotations import BaseReader, AnnotationCreator
+from PytorchWildlife.data.bioacoustics.bioacoustics_annotations import BaseReader, AnnotationCreator
 import pandas as pd
 import argparse
 import os
@@ -25,9 +25,8 @@ class HumboldtAves(BaseReader):
 
     def add_dataset_info(self):
         self.annotation_creator.add_info(
-            title = "Humboldt_Aves",
-            license = "CC-BY-4.0",
-            )
+            url = "https://doi.org/10.5281/zenodo.18563039"
+        )
 
     def add_sounds(self):
         flac_files = [f for f in os.listdir(self.sound_files_path) if f.endswith('.wav')]

@@ -10,7 +10,7 @@ import argparse
 import json
 from sklearn.model_selection import GroupShuffleSplit
 
-from PytorchWildlife.utils.bioacoustics_configs import load_config
+from PytorchWildlife.data.bioacoustics.bioacoustics_configs import load_config
 
 
 def create_splits_from_windows(

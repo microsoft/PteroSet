@@ -36,12 +36,12 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, Learning
 
 # Import from PytorchWildlife core library
 from PytorchWildlife.models.bioacoustics import ResNetClassifier
-from PytorchWildlife.data.bioacoustics_datasets import (
+from PytorchWildlife.data.bioacoustics.bioacoustics_datasets import (
     BioacousticsDataset,
     SpectrogramAugmentations,
     MixUpCollator,
 )
-from PytorchWildlife.utils.bioacoustics_configs import load_config
+from PytorchWildlife.data.bioacoustics.bioacoustics_configs import load_config
 
 
 @dataclass
@@ -299,6 +299,7 @@ def train_single_fold(args, fold_num=None):
 
     if args.ckpt_path is None:
         trainer.fit(model, datamodule=dm)
+        model.test_csv_path = test_csv
         test_results = trainer.test(model, datamodule=dm, ckpt_path="best")
         print(f"Best ckpt: {ckpt_cb.best_model_path}")
         print(f"Best score: {ckpt_cb.best_model_score}")
@@ -325,11 +326,13 @@ def train_single_fold(args, fold_num=None):
             model._apply_freezing_strategy()
 
             trainer.fit(model, datamodule=dm)
+            model.test_csv_path = test_csv
             test_results = trainer.test(model, datamodule=dm, ckpt_path='best')
             print("Finetune completed.")
             print(f"Best ckpt: {ckpt_cb.best_model_path}")
             print(f"Best score: {ckpt_cb.best_model_score}")
         else:
+            model.test_csv_path = test_csv
             test_results = trainer.test(model, datamodule=dm)
             print(f"Test completed from checkpoint {args.ckpt_path}")
     

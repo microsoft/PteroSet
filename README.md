@@ -75,3 +75,12 @@ python train.py --config config.yaml \
     --ckpt_path checkpoint.ckpt \
     --test_csv test_split.csv \
 ```
+
+## 8. Inference Model
+
+python inference.py \
+     --checkpoint model.ckpt \
+     --audios_source /path/to/audio/folder \
+     --dataset birds \
+     --window_size_sec 5.0 \
+     --overlap_sec 4.0

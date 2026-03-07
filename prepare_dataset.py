@@ -20,8 +20,8 @@ from typing import List, Optional
 import pandas as pd
 
 # Import from PytorchWildlife core library
-from PytorchWildlife.utils.bioacoustics_configs import load_config, DomainConfig
-from PytorchWildlife.data.bioacoustics_windows import build_windows
+from PytorchWildlife.data.bioacoustics.bioacoustics_configs import load_config, DomainConfig
+from PytorchWildlife.data.bioacoustics.bioacoustics_windows import build_windows
 
 
 def count_window_labels(windows: List[dict]) -> dict:
@@ -137,7 +137,7 @@ def run_windows(config: DomainConfig) -> List[dict]:
 def run_spectrograms(config: DomainConfig, windows: List[dict]) -> None:
     """Compute mel spectrograms using GPU."""
     # Import here to avoid loading torch unnecessarily
-    from PytorchWildlife.data.bioacoustics_spectrograms import compute_mel_spectrograms_gpu
+    from PytorchWildlife.data.bioacoustics.bioacoustics_spectrograms import compute_mel_spectrograms_gpu
 
     print(f"\n{'='*60}")
     print(f"Step: Compute Mel Spectrograms (GPU)")

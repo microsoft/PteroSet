@@ -1,7 +1,11 @@
-name: birds
+name: Pteroset
 
 datasets:
-  - Humboldt_Aves
+  - MAP1
+  - PPA1
+  - PPA2
+  - PPA3
+  - PPA4
 
 class_names:
   0: "No Birds"
@@ -17,20 +21,13 @@ audio:
   sample_rate: 48000
   window_size_sec: 5.0
   overlap_sec: 4.0
-  # Window generation strategy:
-  #   - "sliding": Fixed overlap windows across entire audio (default)
-  #   - "balanced": Centers windows on annotations, samples negatives
   window_strategy: "sliding"
-  # For "balanced" strategy only: proportion of negatives (0.5 = 50% negatives)
-  negative_proportion: 0.5
 
 spectrogram:
   n_fft: 2048
   hop_length: 512
   n_mels: 224
   top_db: 80.0
-  fill_highfreq: false
-  noise_db_std: 3.0 # Standard deviation of noise in dB when fill_highfreq is true
   storage_dtype: "float32"
 
 training:

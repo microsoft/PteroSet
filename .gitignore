@@ -11,3 +11,4 @@ outputs/
 data/annotations_examples/
 data/audios_48khz/
 data/labels_48khz/
+data/predictions/

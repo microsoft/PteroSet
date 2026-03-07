@@ -14,7 +14,7 @@ import json
 import csv
 from collections import defaultdict
 
-from PytorchWildlife.utils.bioacoustics_configs import load_config
+from PytorchWildlife.data.bioacoustics.bioacoustics_configs import load_config
 
 
 def extract_nonoverlapping_windows(windows, window_size_samples):
