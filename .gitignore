@@ -9,6 +9,6 @@ outputs/
 *.ckpt
 *.pt
 data/annotations_examples/
-data/audios_48khz/
-data/labels_48khz/
+data/audios*
+data/labels*
 data/predictions/

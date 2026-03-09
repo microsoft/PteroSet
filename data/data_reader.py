@@ -18,14 +18,14 @@ class HumboldtAves(BaseReader):
         if annotation_level not in ("species", "identification"):
             raise ValueError("annotation_level must be 'species' or 'identification'")
         self.annotation_level = annotation_level
-        self.sound_files_path = os.path.join(self.data_path, "audios_48khz")
+        self.sound_files_path = os.path.join(self.data_path, "audios_192khz")
         self.annotation_files_path = os.path.join(self.data_path, "labels_48khz")
         self.species_file = os.path.join(self.data_path, "species.csv")
         self.output_path = os.path.join(data_path, f"annotations_{annotation_level}.json")
 
     def add_dataset_info(self):
         self.annotation_creator.add_info(
-            url = "https://doi.org/10.5281/zenodo.18563039"
+            url = "https://zenodo.org/records/18563039"
         )
 
     def add_sounds(self):
@@ -36,6 +36,7 @@ class HumboldtAves(BaseReader):
             latitude = None
             longitude = None
             date_recorded = None
+            project = None
             self.annotation_creator.add_sound(
                 id=i,
                 file_name_path= os.path.join(os.path.relpath(self.sound_files_path, ".."), file_name),
@@ -43,7 +44,8 @@ class HumboldtAves(BaseReader):
                 sample_rate=sample_rate,
                 latitude=latitude,
                 longitude=longitude,
-                date_recorded=date_recorded
+                date_recorded=date_recorded,
+                project=project
             )
 
     def add_categories(self):
