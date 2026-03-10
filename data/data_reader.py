@@ -21,6 +21,7 @@ class HumboldtAves(BaseReader):
         self.sound_files_path = os.path.join(self.data_path, "audios_192khz")
         self.annotation_files_path = os.path.join(self.data_path, "labels_48khz")
         self.species_file = os.path.join(self.data_path, "species.csv")
+        self.metadata_file = os.path.join(self.data_path, "metadata.csv")
         self.output_path = os.path.join(data_path, f"annotations_{annotation_level}.json")
 
     def add_dataset_info(self):
@@ -30,13 +31,15 @@ class HumboldtAves(BaseReader):
 
     def add_sounds(self):
         flac_files = [f for f in os.listdir(self.sound_files_path) if f.endswith('.wav')]
+        metadata = pd.read_csv(self.metadata_file)
         for i, file_name in enumerate(flac_files):
             file_path = os.path.join(self.sound_files_path, file_name)
             duration, sample_rate = self.annotation_creator._get_duration_and_sample_rate(file_path)
-            latitude = None
-            longitude = None
-            date_recorded = None
-            project = None
+            file_metadata = metadata[metadata['audio_file'] == file_name]
+            latitude = file_metadata["latitude"].values[0] if not file_metadata.empty else None
+            longitude = file_metadata["longitude"].values[0] if not file_metadata.empty else None
+            date_recorded = str(file_metadata["date_recorded"].values[0]) if not file_metadata.empty else None
+            project = file_metadata["project_name"].values[0] if not file_metadata.empty else None
             self.annotation_creator.add_sound(
                 id=i,
                 file_name_path= os.path.join(os.path.relpath(self.sound_files_path, ".."), file_name),

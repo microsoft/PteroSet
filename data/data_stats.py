@@ -679,11 +679,11 @@ def plot_audios_by_project_time_of_day(annotations=None, categories=None, sounds
         print("No sounds found to plot by project")
         return
     
-    # Sort projects chronologically (PAREX first if exists, then by name which includes year)
+    # Sort projects chronologically (MAP1 first if exists, then by name which includes year)
     def sort_key(item):
         project_name = item[0]
-        if 'PAREX' in project_name.upper():
-            return '0_' + project_name  # Ensure PAREX comes first
+        if 'MAP1' in project_name.upper():
+            return '0_' + project_name  # Ensure MAP1 comes first
         return project_name
     
     sorted_projects = sorted(selected_sounds.items(), key=sort_key)
@@ -1137,8 +1137,39 @@ def print_data_statistics():
     print(f"  Median duration: {np.median(ann_durations_id):.3f} seconds")
     print()
     
-    # ── 7. SPECIES DIVERSITY ──
-    print("7. SPECIES DIVERSITY")
+    # ── 7. ANNOTATION FREQUENCY STATISTICS (IDENTIFICATION LEVEL) ──
+    print("7. ANNOTATION FREQUENCY STATISTICS (IDENTIFICATION LEVEL)")
+    print("-" * 80)
+
+    f_mins_id = [ann["f_min"] for ann in annotations_identification]
+    f_maxs_id = [ann["f_max"] for ann in annotations_identification]
+    f_ranges_id = [ann["f_max"] - ann["f_min"] for ann in annotations_identification]
+
+    print(f"  Low Frequency (Hz):")
+    print(f"    Min:    {np.min(f_mins_id):.1f}")
+    print(f"    Max:    {np.max(f_mins_id):.1f}")
+    print(f"    Mean:   {np.mean(f_mins_id):.1f}")
+    print(f"    Median: {np.median(f_mins_id):.1f}")
+    print(f"    Std:    {np.std(f_mins_id):.1f}")
+    print(f"  High Frequency (Hz):")
+    print(f"    Min:    {np.min(f_maxs_id):.1f}")
+    print(f"    Max:    {np.max(f_maxs_id):.1f}")
+    print(f"    Mean:   {np.mean(f_maxs_id):.1f}")
+    print(f"    Median: {np.median(f_maxs_id):.1f}")
+    print(f"    Std:    {np.std(f_maxs_id):.1f}")
+    print(f"  Bandwidth (Hz):")
+    print(f"    Min:    {np.min(f_ranges_id):.1f}")
+    print(f"    Max:    {np.max(f_ranges_id):.1f}")
+    print(f"    Mean:   {np.mean(f_ranges_id):.1f}")
+    print(f"    Median: {np.median(f_ranges_id):.1f}")
+    print(f"    Std:    {np.std(f_ranges_id):.1f}")
+    print(f"  Percentiles (Low / High / Bandwidth):")
+    for p in [5, 25, 50, 75, 95]:
+        print(f"    P{p:2d}: {np.percentile(f_mins_id, p):8.1f} / {np.percentile(f_maxs_id, p):8.1f} / {np.percentile(f_ranges_id, p):8.1f}")
+    print()
+
+    # ── 8. SPECIES DIVERSITY ──
+    print("8. SPECIES DIVERSITY")
     print("-" * 80)
     
     print(f"  Total unique species: {len(categories_species)}")
@@ -1192,10 +1223,10 @@ def print_statistics_by_project():
         if audio_file in audio_to_project:
             sound_id_to_project[sound_id] = audio_to_project[audio_file]
     
-    # Get unique projects (sorted with PAREX first)
+    # Get unique projects (sorted with MAP1 first)
     def sort_projects(proj):
-        if 'PAREX' in proj.upper():
-            return '0_' + proj  # PAREX comes first
+        if 'MAP1' in proj.upper():
+            return '0_' + proj  # MAP1 comes first
         return '1_' + proj
     
     projects = sorted(set(audio_to_project.values()), key=sort_projects)
@@ -1313,8 +1344,8 @@ def plot_statistics_by_project(projects, project_stats):
     num_projects = len(projects)
     
     # Create figure with subplots (3 rows x 2 cols = 6 subplots)
-    fig = plt.figure(figsize=(24, 14))
-    gs = fig.add_gridspec(3, 2, hspace=0.4, wspace=0.35)
+    fig = plt.figure(figsize=(20, 14))
+    gs = fig.add_gridspec(3, 2, hspace=0.4, wspace=0.1)
     
     # 1. Number of audios per project
     ax1 = fig.add_subplot(gs[0, 0])
@@ -1322,12 +1353,13 @@ def plot_statistics_by_project(projects, project_stats):
     colors = plt.cm.magma(np.linspace(0.2, 0.85, num_projects))
     bars = ax1.barh(projects, num_audios, color=colors)
     ax1.set_xlabel('Number of Audios', fontsize=12)
-    ax1.set_title('Number of Audios per Project', fontsize=13, fontweight='bold')
+    ax1.set_title('Audio Recording per Project', fontsize=13, fontweight='bold')
     ax1.tick_params(axis='both', labelsize=10)
     ax1.invert_yaxis()
     for bar, val in zip(bars, num_audios):
         ax1.text(bar.get_width() + max(num_audios)*0.01, bar.get_y() + bar.get_height()/2, 
                  str(val), va='center', fontsize=10)
+    ax1.set_xlim(right=max(num_audios) * 1.15)
     
     # 2. Total audio duration per project (hours)
     ax2 = fig.add_subplot(gs[0, 1])
@@ -1340,6 +1372,7 @@ def plot_statistics_by_project(projects, project_stats):
     for bar, val in zip(bars, total_durations):
         ax2.text(bar.get_width() + max(total_durations)*0.01, bar.get_y() + bar.get_height()/2, 
                  f'{val:.2f}h', va='center', fontsize=10)
+    ax2.set_xlim(right=max(total_durations) * 1.15)
     
     # 3. Mean annotation duration (identification level)
     ax3 = fig.add_subplot(gs[1, 0])
@@ -1354,6 +1387,7 @@ def plot_statistics_by_project(projects, project_stats):
     for bar, val in zip(bars, total_ann_dur_id):
         ax3.text(bar.get_width() + max(total_ann_dur_id)*0.01, bar.get_y() + bar.get_height()/2, 
                  f'{val:.2f}h', va='center', fontsize=10)
+    ax3.set_xlim(right=max(total_ann_dur_id) * 1.15)
     
     # 4. Number of identification-level annotations per project
     ax4 = fig.add_subplot(gs[1, 1])
@@ -1366,6 +1400,7 @@ def plot_statistics_by_project(projects, project_stats):
     for bar, val in zip(bars, num_anns_id):
         ax4.text(bar.get_width() + max(num_anns_id)*0.01, bar.get_y() + bar.get_height()/2, 
                  str(val), va='center', fontsize=10)
+    ax4.set_xlim(right=max(num_anns_id) * 1.15)
     
     # 5. Number of species-level annotations per project
     ax5 = fig.add_subplot(gs[2, 0])
@@ -1378,6 +1413,7 @@ def plot_statistics_by_project(projects, project_stats):
     for bar, val in zip(bars, num_anns_species):
         ax5.text(bar.get_width() + max(num_anns_species)*0.01, bar.get_y() + bar.get_height()/2, 
                  str(val), va='center', fontsize=10)
+    ax5.set_xlim(right=max(num_anns_species) * 1.15)
     
     # 6. Number of unique species per project
     ax6 = fig.add_subplot(gs[2, 1])
@@ -1390,8 +1426,10 @@ def plot_statistics_by_project(projects, project_stats):
     for bar, val in zip(bars, num_species):
         ax6.text(bar.get_width() + max(num_species)*0.01, bar.get_y() + bar.get_height()/2, 
                  str(val), va='center', fontsize=10)
+    ax6.set_xlim(right=max(num_species) * 1.15)
     
-    fig.suptitle('Dataset Statistics by Project', fontsize=18, fontweight='bold')
+    fig.subplots_adjust(top=0.92) 
+    fig.suptitle('Dataset Statistics by Project', fontsize=18, fontweight='bold', y=0.97)
     
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()

@@ -12,3 +12,4 @@ data/annotations_examples/
 data/audios*
 data/labels*
 data/predictions/
+data/all_original_labels/
