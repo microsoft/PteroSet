@@ -14,10 +14,10 @@ Usage:
     python train.py --config config/template.yaml --train_csv train.csv --test_csv test.csv
 
     # Cross-validation with all 5 folds
-    python train.py --cross_validation --fold_dir data
+    python train.py --config data/config.yaml --cross_validation --fold_dir data
 
     # Cross-validation with specific fold
-    python train.py --cross_validation --fold_dir data --fold 0
+    python train.py --config data/config.yaml --cross_validation --fold_dir data --fold 0
 """
 
 import argparse

@@ -5,7 +5,7 @@ data/spectrograms/
 data/*.json
 data/*.csv
 data/fold*/
-outputs/
+outputs*
 *.ckpt
 *.pt
 data/annotations_examples/
