@@ -35,6 +35,19 @@ from train import SpectrogramDataModule, DataModuleConfig
 from PytorchWildlife.models.bioacoustics import ResNetClassifier
 from PytorchWildlife.data.bioacoustics.bioacoustics_configs import load_config
 
+# Fold-to-project mapping and colors matching statistics_by_project.png
+# Projects in the statistics plot (in order): MAP1, PPA1, PPA2, PPA3, PPA4
+# Fold 0→PPA1, Fold 1→PPA2, Fold 2→PPA3, Fold 3→PPA4, Fold 4→MAP1
+_PROJECT_COLORS = plt.cm.magma(np.linspace(0.2, 0.85, 5))
+FOLD_PROJECT_NAMES = ['PPA1', 'PPA2', 'PPA3', 'PPA4', 'MAP1']
+FOLD_COLORS = [
+    _PROJECT_COLORS[1],  # Fold 0 → PPA1
+    _PROJECT_COLORS[2],  # Fold 1 → PPA2
+    _PROJECT_COLORS[3],  # Fold 2 → PPA3
+    _PROJECT_COLORS[4],  # Fold 3 → PPA4
+    _PROJECT_COLORS[0],  # Fold 4 → MAP1
+]
+
 
 def evaluate_fold(
     checkpoint_path: str,
@@ -186,8 +199,6 @@ def plot_precision_recall_curves(fold_results: List[Dict], output_path: str):
     """
     fig, ax = plt.subplots(figsize=(10, 8))
     
-    colors = plt.cm.tab10(np.linspace(0, 1, len(fold_results)))
-    
     for i, result in enumerate(fold_results):
         targets = result['targets']
         probs = result['probs']
@@ -196,9 +207,10 @@ def plot_precision_recall_curves(fold_results: List[Dict], output_path: str):
         # Calculate precision-recall curve
         precision, recall, _ = precision_recall_curve(targets, probs)
         
-        # Plot
-        ax.plot(recall, precision, color=colors[i], lw=2, 
-                label=f'Fold {i} (AUPRC = {auprc:.3f})')
+        # Plot using project-specific colors
+        project_name = FOLD_PROJECT_NAMES[i] if i < len(FOLD_PROJECT_NAMES) else f'Fold {i}'
+        ax.plot(recall, precision, color=FOLD_COLORS[i], lw=2, 
+                label=f'Fold {i} - {project_name} (AUPRC = {auprc:.3f})')
     
     ax.set_xlabel('Recall', fontsize=14)
     ax.set_ylabel('Precision', fontsize=14)
@@ -231,12 +243,13 @@ def plot_qualitative_results(
     duration_sec: float = 5.0,
     max_freq_hz: float = 24000.0,
     n_mels: int = 224,
+    fold_index: int = 3,
 ):
     """
-    Plot a grid of spectrograms showing one TP, TN, FP, and FN example per fold,
-    and save the corresponding trimmed audio clips.
+    Plot a 1×4 grid of spectrograms showing one TP, TN, FP, and FN example
+    for a single fold, and save the corresponding trimmed audio clips.
 
-    Each row corresponds to a category and each column to a fold.
+    Each column corresponds to a category (TP, TN, FP, FN).
     For TP and FN examples, overlapping annotations are drawn as rectangles.
     Audio clips are saved next to the plot as
     ``<output_stem>_fold<F>_<category>.wav``.
@@ -251,14 +264,17 @@ def plot_qualitative_results(
         duration_sec: Duration of each spectrogram window in seconds.
         max_freq_hz: Maximum frequency in Hz (Nyquist frequency).
         n_mels: Number of mel frequency bins.
+        fold_index: Which fold to plot (default: 3, i.e. PPA4 test set).
     """
     rng = np.random.default_rng(seed)
     categories = ['TP', 'TN', 'FP', 'FN']
     cat_colors = {'TP': 'green', 'TN': 'green', 'FP': 'red', 'FN': 'red'}
-    n_folds = len(fold_results)
-    n_rows = len(categories)
+    n_cols = len(categories)
     out_stem = Path(output_path).stem
     out_dir = Path(output_path).parent
+
+    result = fold_results[fold_index]
+    project_name = FOLD_PROJECT_NAMES[fold_index] if fold_index < len(FOLD_PROJECT_NAMES) else ''
 
     # Load annotations indexed by sound_id for TP/FN overlay
     annotations_by_sound = {}
@@ -274,136 +290,125 @@ def plot_qualitative_results(
     freq_ticks_hz = freq_ticks_hz[freq_ticks_hz <= max_freq_hz]
     mel_ticks = 2595.0 * np.log10(1.0 + freq_ticks_hz / 700.0)
     mel_max = 2595.0 * np.log10(1.0 + max_freq_hz / 700.0)
-    # Map mel values to bin positions (0 to n_mels)
     mel_tick_positions = mel_ticks / mel_max * n_mels
     freq_tick_labels = [f"{int(f/1000)}k" if f >= 1000 else str(int(f)) for f in freq_ticks_hz]
 
-    fig, axes = plt.subplots(n_rows, n_folds, figsize=(3 * n_folds, 3.5 * n_rows))
-    if n_folds == 1:
-        axes = axes[:, np.newaxis]
+    fig, axes = plt.subplots(1, n_cols, figsize=(3 * n_cols, 3.5))
 
-    # Pre-compute per-fold category indices
-    fold_cat_indices = []
-    for result in fold_results:
-        preds = result['preds']
-        targets = result['targets']
-        fold_cat_indices.append({
-            'TP': np.where((preds == 1) & (targets == 1))[0],
-            'TN': np.where((preds == 0) & (targets == 0))[0],
-            'FP': np.where((preds == 1) & (targets == 0))[0],
-            'FN': np.where((preds == 0) & (targets == 1))[0],
-        })
+    # Pre-compute category indices for the selected fold
+    preds = result['preds']
+    targets = result['targets']
+    cat_indices = {
+        'TP': np.where((preds == 1) & (targets == 1))[0],
+        'TN': np.where((preds == 0) & (targets == 0))[0],
+        'FP': np.where((preds == 1) & (targets == 0))[0],
+        'FN': np.where((preds == 0) & (targets == 1))[0],
+    }
 
-    for row, cat in enumerate(categories):
-        for col, result in enumerate(fold_results):
-            ax = axes[row, col]
-            paths = result['paths']
-            targets = result['targets']
-            test_df = result['test_df']
-            indices = fold_cat_indices[col][cat]
+    pending_rects = []
 
-            # Column headers (fold numbers) on the first row
-            if row == 0:
-                ax.set_title(f"Fold {col}", fontsize=11, fontweight='bold')
+    for col, cat in enumerate(categories):
+        ax = axes[col]
+        paths = result['paths']
+        test_df = result['test_df']
+        indices = cat_indices[cat]
 
-            if len(indices) == 0:
-                ax.text(0.5, 0.5, f'No {cat}', ha='center', va='center',
-                        fontsize=11, transform=ax.transAxes)
-                ax.set_xticks([])
-                ax.set_yticks([])
-            else:
-                idx = rng.choice(indices)
-                spec = np.load(paths[idx])
-                n_time_frames = spec.shape[-1]
-                ax.imshow(spec, aspect='auto', origin='lower', cmap='magma')
+        ax.set_title(cat, fontsize=11, fontweight='bold', color=cat_colors[cat])
 
-                # X-axis: time in seconds
-                time_ticks_sec = np.arange(0, duration_sec + 0.5, 1.0)
-                time_tick_positions = time_ticks_sec / duration_sec * n_time_frames
-                ax.set_xticks(time_tick_positions)
-                if row == n_rows - 1:
-                    ax.set_xticklabels([f"{t:.0f}" for t in time_ticks_sec], fontsize=7)
-                    ax.set_xlabel("Time (s)", fontsize=8)
-                else:
-                    ax.set_xticklabels([])
+        if len(indices) == 0:
+            ax.text(0.5, 0.5, f'No {cat}', ha='center', va='center',
+                    fontsize=11, transform=ax.transAxes)
+            ax.set_xticks([])
+            ax.set_yticks([])
+        else:
+            idx = rng.choice(indices)
+            spec = np.load(paths[idx])
+            n_time_frames = spec.shape[-1]
+            ax.imshow(spec, aspect='auto', origin='lower', cmap='magma')
 
-                # Y-axis: frequency in mel scale
-                ax.set_yticks(mel_tick_positions)
-                if col == 0:
-                    ax.set_yticklabels(freq_tick_labels, fontsize=7)
-                    ax.set_ylabel("Freq (Hz)", fontsize=9, labelpad=1)
-                else:
-                    ax.set_yticklabels([])
+            # X-axis: time in seconds
+            time_ticks_sec = np.arange(0, duration_sec + 0.5, 1.0)
+            time_tick_positions = time_ticks_sec / duration_sec * n_time_frames
+            ax.set_xticks(time_tick_positions)
+            ax.set_xticklabels([f"{t:.0f}" for t in time_ticks_sec], fontsize=7)
+            ax.set_xlabel("Time (s)", fontsize=8)
 
-                # Overlay annotations for TP and FN
-                spec_basename = os.path.basename(paths[idx])
-                spec_to_row = {r['spec_name']: r for _, r in test_df.iterrows()}
-                csv_row = spec_to_row.get(spec_basename)
-
-                if cat in ('TP', 'FN') and csv_row is not None and annotations_by_sound:
-                    sound_id = int(csv_row['sound_id'])
-                    sr = int(csv_row['sample_rate'])
-                    win_start_sec = int(csv_row['start']) / sr
-                    win_end_sec = int(csv_row['end']) / sr
-
-                    for ann in annotations_by_sound.get(sound_id, []):
-                        t_min = ann['t_min']
-                        t_max = ann['t_max']
-                        # Check overlap with window
-                        if t_max <= win_start_sec or t_min >= win_end_sec:
-                            continue
-                        # Clip to window bounds and convert to pixel coords
-                        t0 = max(t_min - win_start_sec, 0.0)
-                        t1 = min(t_max - win_start_sec, duration_sec)
-                        x0 = t0 / duration_sec * n_time_frames
-                        x1 = t1 / duration_sec * n_time_frames
-
-                        f_min = ann.get('f_min', 0.0)
-                        f_max = ann.get('f_max', max_freq_hz)
-                        y0 = _hz_to_mel_bin(f_min, max_freq_hz, n_mels)
-                        y1 = _hz_to_mel_bin(f_max, max_freq_hz, n_mels)
-
-                        rect = mpatches.Rectangle(
-                            (x0, y0), x1 - x0, y1 - y0,
-                            linewidth=1.5, edgecolor='cyan', facecolor='none',
-                            linestyle='--',
-                        )
-                        ax.add_patch(rect)
-
-                # Save trimmed audio clip
-                if csv_row is not None:
-                    audio_path = os.path.join(audio_dir, csv_row['sound_filename'])
-                    start_sample = int(csv_row['start'])
-                    end_sample = int(csv_row['end'])
-                    sr = int(csv_row['sample_rate'])
-                    try:
-                        audio_data, _ = sf.read(
-                            audio_path,
-                            start=start_sample,
-                            stop=end_sample,
-                            dtype='float32',
-                        )
-                        clip_path = out_dir / f"{out_stem}_fold{col}_{cat}.wav"
-                        sf.write(str(clip_path), audio_data, sr)
-                        print(f"  Saved audio: {clip_path}")
-                    except Exception as e:
-                        print(f"  Warning: could not save audio for fold {col} {cat}: {e}")
-
-            # Category label on the left for the first column
+            # Y-axis: frequency in mel scale
+            ax.set_yticks(mel_tick_positions)
             if col == 0:
-                ax.text(
-                    -0.17, 0.5, cat,
-                    transform=ax.transAxes,
-                    fontsize=10, fontweight='bold', color=cat_colors[cat],
-                    ha='right', va='center', rotation=90,
-                )
+                ax.set_yticklabels(freq_tick_labels, fontsize=7)
+                ax.set_ylabel("Freq (Hz)", fontsize=9, labelpad=1)
+            else:
+                ax.set_yticklabels([])
 
-    # General title
-    fig.suptitle("Qualitative Examples per Fold", fontsize=15, fontweight='bold')
+            # Resolve CSV row for annotation overlay and audio saving
+            spec_basename = os.path.basename(paths[idx])
+            spec_to_row = {r['spec_name']: r for _, r in test_df.iterrows()}
+            csv_row = spec_to_row.get(spec_basename)
 
+            # Save trimmed audio clip
+            if csv_row is not None:
+                audio_path = os.path.join(audio_dir, csv_row['sound_filename'])
+                start_sample = int(csv_row['start'])
+                end_sample = int(csv_row['end'])
+                sr = int(csv_row['sample_rate'])
+                try:
+                    audio_data, _ = sf.read(
+                        audio_path,
+                        start=start_sample,
+                        stop=end_sample,
+                        dtype='float32',
+                    )
+                    clip_path = out_dir / f"{out_stem}_fold{fold_index}_{cat}.wav"
+                    sf.write(str(clip_path), audio_data, sr)
+                    print(f"  Saved audio: {clip_path}")
+                except Exception as e:
+                    print(f"  Warning: could not save audio for fold {fold_index} {cat}: {e}")
+
+            # Collect bounding-box rectangles to add after saving the no-bbox version
+            if cat in ('TP', 'FN') and csv_row is not None and annotations_by_sound:
+                sound_id = int(csv_row['sound_id'])
+                sr = int(csv_row['sample_rate'])
+                win_start_sec = int(csv_row['start']) / sr
+                win_end_sec = int(csv_row['end']) / sr
+
+                for ann in annotations_by_sound.get(sound_id, []):
+                    t_min = ann['t_min']
+                    t_max = ann['t_max']
+                    if t_max <= win_start_sec or t_min >= win_end_sec:
+                        continue
+                    t0 = max(t_min - win_start_sec, 0.0)
+                    t1 = min(t_max - win_start_sec, duration_sec)
+                    x0 = t0 / duration_sec * n_time_frames
+                    x1 = t1 / duration_sec * n_time_frames
+
+                    f_min = ann.get('f_min', 0.0)
+                    f_max = ann.get('f_max', max_freq_hz)
+                    y0 = _hz_to_mel_bin(f_min, max_freq_hz, n_mels)
+                    y1 = _hz_to_mel_bin(f_max, max_freq_hz, n_mels)
+
+                    pending_rects.append((ax, x0, y0, x1 - x0, y1 - y0))
+
+    fig.suptitle(f"Qualitative Examples — Fold {fold_index} - {project_name}",
+                 fontsize=15, fontweight='bold')
     plt.tight_layout()
+
+    # Save version without bounding boxes
+    no_bbox_path = out_dir / f"{out_stem}_no_bbox.png"
+    plt.savefig(str(no_bbox_path), dpi=300, bbox_inches='tight')
+    print(f"\nQualitative results (no bboxes) saved to: {no_bbox_path}")
+
+    # Add bounding-box rectangles and save version with them
+    for ax, x0, y0, w, h in pending_rects:
+        rect = mpatches.Rectangle(
+            (x0, y0), w, h,
+            linewidth=1.5, edgecolor='cyan', facecolor='none',
+            linestyle='--',
+        )
+        ax.add_patch(rect)
+
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"\nQualitative results saved to: {output_path}")
+    print(f"Qualitative results (with bboxes) saved to: {output_path}")
     plt.close()
 
 

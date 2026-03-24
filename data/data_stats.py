@@ -405,11 +405,16 @@ def plot_annotation_scenarios(annotations=None, categories=None, sounds=None):
         ('nested', 'Nested Annotations', '1 (birds)')
     ]
     
+    subplot_labels = ['a)', 'b)', 'c)', 'd)', 'e)', 'f)']
+
     for idx, (key, title, label) in enumerate(scenario_names):
         ax = axes[idx]
+        letter = subplot_labels[idx]
         
         if key not in examples:
-            ax.set_title(f"{title}\n(Example not found)", fontsize=10)
+            ax.set_title(f"{letter} {title}", fontsize=10, fontweight='bold')
+            ax.text(0.5, 0.5, '(Example not found)', ha='center', va='center',
+                    fontsize=9, transform=ax.transAxes)
             ax.axis('off')
             continue
         
@@ -456,376 +461,16 @@ def plot_annotation_scenarios(annotations=None, categories=None, sounds=None):
         
         audio_name = os.path.basename(info['sound']['file_name_path'])
         n_anns = len(info['annotations'])
-        ax.set_title(f"{title}\nLabel: {label} | {n_anns} annotation(s)\n{audio_name} [{win_start_sec:.1f}s - {win_end_sec:.1f}s]", 
-                     fontsize=9)
+        ax.set_title(f"{letter} {title}", fontsize=10, fontweight='bold', pad=28)
+        ax.text(0.5, 1.01, f"Label: {label} | {n_anns} annotation(s)\n"
+                f"{audio_name} [{win_start_sec:.1f}s - {win_end_sec:.1f}s]",
+                transform=ax.transAxes, fontsize=8, ha='center', va='bottom')
     
     fig.suptitle("Annotation Scenarios for Model Training", fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.savefig(out, dpi=150)
     plt.close()
     print(f"Saved annotation scenarios to {out}")
-
-
-def plot_complete_audio(annotations, categories, sounds, sound_id=None):
-    """Plot complete audio file as spectrogram with all annotations overlaid.
-    
-    Args:
-        annotations: List of all annotations
-        categories: Dictionary of categories
-        sounds: Dictionary of sounds
-        sound_id: Specific sound ID to plot. If None, picks the first sound with annotations
-    """
-    import librosa
-    import soundfile as sf
-    from matplotlib.patches import Rectangle
-    
-    # Select a sound to plot
-    if sound_id is None:
-        # Find a sound that has annotations
-        sound_ann_counts = Counter(ann['sound_id'] for ann in annotations)
-        if not sound_ann_counts:
-            print("No annotations found to plot complete audio")
-            return
-        sound_id, _ = sound_ann_counts.most_common(1)[0]
-    
-    sound = sounds.get(sound_id)
-    if sound is None:
-        print(f"Sound ID {sound_id} not found")
-        return
-    
-    audio_path = sound['file_name_path']
-    audio_name = os.path.basename(audio_path)
-    
-    # Resolve audio path - it might be relative to project root
-    if not os.path.isabs(audio_path):
-        # Try relative to ROOT (current data directory)
-        audio_path_candidate = os.path.join(ROOT, audio_path)
-        if not os.path.exists(audio_path_candidate):
-            # Try relative to parent directory (birds_bioacoustics/)
-            audio_path_candidate = os.path.join(os.path.dirname(ROOT), audio_path)
-        if not os.path.exists(audio_path_candidate):
-            # Try treating path as if it starts with 'data/' and we're already in data/
-            if audio_path.startswith('data/'):
-                audio_path_candidate = os.path.join(ROOT, audio_path[5:])  # Remove 'data/' prefix
-        audio_path = audio_path_candidate
-    
-    # Check if output already exists
-    safe_name = audio_name.replace('.', '_').replace('/', '_')
-    out = os.path.join(OUTPUT_DIR, f"complete_audio_{safe_name}.png")
-    
-    if os.path.exists(out):
-        print(f"Skipping complete audio plot (already exists): {out}")
-        return
-    
-    print(f"Plotting complete audio: {audio_name}")
-    
-    # Load audio file
-    if not os.path.exists(audio_path):
-        print(f"Audio file not found: {audio_path}")
-        print(f"Searched in: {audio_path}")
-        return
-    
-    try:
-        audio, sr = sf.read(audio_path)
-        if len(audio.shape) > 1:
-            audio = audio[:, 0]  # Take first channel if stereo
-    except Exception as e:
-        print(f"Error loading audio file: {e}")
-        return
-    
-    # Resample if needed
-    if sr != SR:
-        audio = librosa.resample(audio, orig_sr=sr, target_sr=SR)
-    
-    # Compute mel spectrogram for the complete audio
-    import librosa
-    mel_spec = librosa.feature.melspectrogram(
-        y=audio, sr=SR, n_fft=2048, hop_length=HOP_LENGTH,
-        n_mels=N_MELS, fmax=FMAX
-    )
-    mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
-    
-    # Get all annotations for this sound
-    sound_annotations = [ann for ann in annotations if ann['sound_id'] == sound_id]
-    
-    # Create figure
-    duration = len(audio) / SR
-    fig_width = max(15, duration / 10)  # Scale width with duration
-    fig, ax = plt.subplots(figsize=(fig_width, 8))
-    
-    # Plot spectrogram
-    librosa.display.specshow(
-        mel_spec_db, sr=SR, hop_length=HOP_LENGTH,
-        x_axis='time', y_axis='mel',
-        fmax=FMAX, cmap='magma', ax=ax
-    )
-    
-    # Overlay all annotations
-    for ann in sound_annotations:
-        t_min, t_max = ann['t_min'], ann['t_max']
-        f_min, f_max = ann['f_min'], ann['f_max']
-        
-        rect = Rectangle(
-            (t_min, f_min), t_max - t_min, f_max - f_min,
-            linewidth=1.0, edgecolor="cyan", facecolor="none", linestyle="--", alpha=0.8
-        )
-        ax.add_patch(rect)
-    
-    # Add colorbar
-    plt.colorbar(ax.collections[0], ax=ax, format='%+2.0f dB', label='Power (dB)')
-    
-    ax.set_xlabel("Time (s)", fontsize=10)
-    ax.set_ylabel("Frequency (Hz)", fontsize=10)
-    ax.set_title(f"Complete Audio: {audio_name}\n"
-                 f"Duration: {duration:.1f}s | Annotations: {len(sound_annotations)}", 
-                 fontsize=12, fontweight='bold')
-    
-    plt.tight_layout()
-    plt.savefig(out, dpi=150)
-    plt.close()
-    print(f"Saved complete audio plot to {out}")
-
-
-def plot_audios_by_project_time_of_day(annotations=None, categories=None, sounds=None):
-    """Plot one audio per project with shared x-axis showing time of day.
-    
-    Each audio is 480 seconds (8 minutes) representing a full day:
-    10 seconds recorded every 30 minutes, stitched together.
-    X-axis shows actual time of day (00:00 to 24:00).
-    
-    Uses annotations_identification.json for annotations.
-    """
-    import librosa
-    import soundfile as sf
-    from matplotlib.patches import Rectangle
-    from matplotlib.ticker import FuncFormatter
-    import pandas as pd
-    
-    out = os.path.join(OUTPUT_DIR, "audios_by_project_time_of_day.png")
-    
-    if os.path.exists(out):
-        print(f"Skipping project audio plots (already exists): {out}")
-        return
-    
-    # Load annotations_identification.json for this plot
-    annotations_id_path = os.path.join(ROOT, "annotations_identification.json")
-    if not os.path.exists(annotations_id_path):
-        print(f"Annotations identification file not found: {annotations_id_path}")
-        return
-    
-    with open(annotations_id_path, 'r') as f:
-        data = json.load(f)
-    
-    categories = {c["id"]: c for c in data["categories"]}
-    sounds = {s["id"]: s for s in data["sounds"]}
-    annotations = data["annotations"]
-
-    # Try loading species-level annotations for color-coded boxes
-    species_annotations_path = os.path.join(ROOT, "annotations_species.json")
-    species_by_coords = {}
-    species_categories = {}
-    if os.path.exists(species_annotations_path):
-        with open(species_annotations_path, 'r') as f:
-            species_data = json.load(f)
-        species_categories = {c["id"]: c for c in species_data["categories"]}
-        for ann in species_data["annotations"]:
-            key = (ann["sound_id"], round(ann["t_min"], 6), round(ann["t_max"], 6),
-                   round(ann["f_min"], 1), round(ann["f_max"], 1))
-            species_by_coords[key] = ann
-    
-    print(f"Loaded {len(annotations)} annotations from annotations_identification.json")
-    
-    # Load metadata to get project information
-    metadata_path = os.path.join(ROOT, "metadata.csv")
-    if not os.path.exists(metadata_path):
-        print(f"Metadata file not found: {metadata_path}")
-        return
-    
-    metadata = pd.read_csv(metadata_path)
-    
-    # Group by project and audio file
-    project_audio_map = {}
-    for _, row in metadata.iterrows():
-        project = row['project_name']
-        audio_file = row['audio_file']
-        
-        if project not in project_audio_map:
-            project_audio_map[project] = []
-        project_audio_map[project].append(audio_file)
-    
-    # For each project, find the sound with most annotations
-    selected_sounds = {}
-    for project, audio_files in project_audio_map.items():
-        best_sound = None
-        max_anns = -1
-        best_audio_file = None
-        
-        for audio_file in audio_files:
-            # Find matching sound by filename
-            for sound_id, sound in sounds.items():
-                sound_basename = os.path.basename(sound['file_name_path'])
-                if sound_basename == audio_file:
-                    n_anns = sum(1 for ann in annotations if ann['sound_id'] == sound_id)
-                    if n_anns > max_anns:
-                        max_anns = n_anns
-                        best_sound = (sound_id, sound)
-                        best_audio_file = audio_file
-                    break
-        
-        if best_sound:
-            selected_sounds[project] = (best_sound, best_audio_file, max_anns)
-    
-    if len(selected_sounds) == 0:
-        print("No sounds found to plot by project")
-        return
-    
-    # Sort projects chronologically (MAP1 first if exists, then by name which includes year)
-    def sort_key(item):
-        project_name = item[0]
-        if 'MAP1' in project_name.upper():
-            return '0_' + project_name  # Ensure MAP1 comes first
-        return project_name
-    
-    sorted_projects = sorted(selected_sounds.items(), key=sort_key)
-    
-    print(f"Plotting {len(sorted_projects)} projects with time-of-day x-axis")
-    for proj, (sound_info, audio_file, n_anns) in sorted_projects:
-        print(f"  - {proj}: {audio_file} ({n_anns} annotations)")
-    
-    # Create subplots
-    n_projects = len(sorted_projects)
-    fig, axes = plt.subplots(n_projects, 1, figsize=(16, 3 * n_projects))
-    
-    if n_projects == 1:
-        axes = [axes]
-    
-    # Conversion: each second in audio represents 3 minutes in real time
-    # (480 seconds audio represents 24 hours = 1440 minutes)
-    def audio_seconds_to_hours(t_seconds):
-        """Convert audio time (seconds) to time of day (hours from midnight)"""
-        return t_seconds * 3.0 / 60.0  # Each second = 3 minutes = 0.05 hours
-    
-    def format_time_of_day(seconds, pos=None):
-        """Format audio seconds as HH:MM time of day"""
-        hours_float = audio_seconds_to_hours(seconds)
-        hours = int(hours_float)
-        mins = int((hours_float % 1) * 60)
-        return f"{hours:02d}:{mins:02d}"
-    
-    for idx, (project, (sound_info, audio_file, n_anns)) in enumerate(sorted_projects):
-        ax = axes[idx]
-        sound_id, sound = sound_info
-        ax = axes[idx]
-        
-        audio_path = sound['file_name_path']
-        audio_name = os.path.basename(audio_path)
-        
-        # Resolve audio path
-        if not os.path.isabs(audio_path):
-            if audio_path.startswith('data/'):
-                audio_path = os.path.join(ROOT, audio_path[5:])
-            else:
-                audio_path = os.path.join(ROOT, audio_path)
-        
-        if not os.path.exists(audio_path):
-            ax.text(0.5, 0.5, f"Audio file not found:\n{audio_name}", 
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_ylabel(f"{project}", fontsize=10, fontweight='bold')
-            continue
-        
-        # Load and process audio
-        try:
-            audio, sr = sf.read(audio_path)
-            if len(audio.shape) > 1:
-                audio = audio[:, 0]
-            
-            if sr != SR:
-                audio = librosa.resample(audio, orig_sr=sr, target_sr=SR)
-            
-            # Compute mel spectrogram
-            mel_spec = librosa.feature.melspectrogram(
-                y=audio, sr=SR, n_fft=2048, hop_length=HOP_LENGTH,
-                n_mels=N_MELS, fmax=FMAX
-            )
-            mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
-            
-            # Get annotations for this sound
-            sound_annotations = [ann for ann in annotations if ann['sound_id'] == sound_id]
-            
-            # Plot spectrogram with imshow (proper mel-bin y-axis)
-            n_time_frames = mel_spec_db.shape[1]
-            ax.imshow(mel_spec_db, aspect='auto', origin='lower', cmap='magma')
-
-            # Y-axis: mel-scale frequency ticks
-            ax.set_yticks(_MEL_TICK_POSITIONS)
-            ax.set_yticklabels(_MEL_TICK_LABELS, fontsize=7)
-
-            # X-axis: map frame indices to audio seconds for time-of-day formatting
-            audio_dur = len(audio) / SR
-            tick_secs = [t for t in range(0, 481, 10) if t <= audio_dur]
-            x_tick_positions = [t / audio_dur * n_time_frames for t in tick_secs]
-            ax.set_xticks(x_tick_positions)
-            ax.set_xlim(0, n_time_frames)
-            if idx == n_projects - 1:
-                ax.set_xticklabels([format_time_of_day(t) for t in tick_secs],
-                                   fontsize=8, rotation=45, ha='right')
-                ax.set_xlabel("Time of Day", fontsize=11, fontweight='bold')
-            else:
-                ax.set_xticklabels([])
-
-            # Build species color map for this sound
-            species_in_sound = set()
-            if species_by_coords:
-                for ann in sound_annotations:
-                    key = (ann["sound_id"], round(ann["t_min"], 6), round(ann["t_max"], 6),
-                           round(ann["f_min"], 1), round(ann["f_max"], 1))
-                    sp_ann = species_by_coords.get(key)
-                    if sp_ann:
-                        species_in_sound.add(sp_ann['category_id'])
-            species_list = sorted(species_in_sound)
-            cmap_tab = plt.cm.get_cmap('tab20', max(len(species_list), 1))
-            species_color = {sid: cmap_tab(i) for i, sid in enumerate(species_list)}
-
-            # Overlay annotations (converted to frame / mel-bin coordinates)
-            for ann in sound_annotations:
-                t_min_audio = ann['t_min']
-                t_max_audio = ann['t_max']
-                f_min, f_max = ann['f_min'], ann['f_max']
-
-                x0 = t_min_audio / audio_dur * n_time_frames
-                x1 = t_max_audio / audio_dur * n_time_frames
-                y0 = _hz_to_mel_bin(f_min, FMAX, N_MELS)
-                y1 = _hz_to_mel_bin(f_max, FMAX, N_MELS)
-
-                color = "cyan"
-                key = (ann["sound_id"], round(ann["t_min"], 6), round(ann["t_max"], 6),
-                       round(ann["f_min"], 1), round(ann["f_max"], 1))
-                sp_ann = species_by_coords.get(key)
-                if sp_ann and sp_ann['category_id'] in species_color:
-                    color = species_color[sp_ann['category_id']]
-
-                rect = Rectangle(
-                    (x0, y0), x1 - x0, y1 - y0,
-                    linewidth=1.0, edgecolor=color, facecolor="none", linestyle="--", alpha=0.8
-                )
-                ax.add_patch(rect)
-
-            # Format axes
-            ax.set_ylabel(f"{project}\nFrequency (Hz)", fontsize=9, fontweight='bold')
-            ax.set_title(f"{audio_name} | {len(sound_annotations)} annotations", 
-                        fontsize=9, loc='right')
-            
-        except Exception as e:
-            ax.text(0.5, 0.5, f"Error loading audio:\n{str(e)}", 
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_ylabel(f"{project}", fontsize=10, fontweight='bold')
-    
-    fig.suptitle("Audio Spectrograms by Project - Time of Day (10s every 30 min)", 
-                 fontsize=13, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(out, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"Saved project audio plots to {out}")
 
 
 def plot_most_annotated_audio_time_of_day():
@@ -1353,7 +998,7 @@ def plot_statistics_by_project(projects, project_stats):
     colors = plt.cm.magma(np.linspace(0.2, 0.85, num_projects))
     bars = ax1.barh(projects, num_audios, color=colors)
     ax1.set_xlabel('Number of Audios', fontsize=12)
-    ax1.set_title('Audio Recording per Project', fontsize=13, fontweight='bold')
+    ax1.set_title('a) Audio Recording per Project', fontsize=13, fontweight='bold')
     ax1.tick_params(axis='both', labelsize=10)
     ax1.invert_yaxis()
     for bar, val in zip(bars, num_audios):
@@ -1366,7 +1011,7 @@ def plot_statistics_by_project(projects, project_stats):
     total_durations = [np.sum(project_stats[proj]['audio_durations'])/3600 for proj in projects]
     bars = ax2.barh(projects, total_durations, color=colors)
     ax2.set_xlabel('Total Duration (hours)', fontsize=12)
-    ax2.set_title('Total Audio Duration per Project', fontsize=13, fontweight='bold')
+    ax2.set_title('b) Total Audio Duration per Project', fontsize=13, fontweight='bold')
     ax2.tick_params(axis='both', labelsize=10)
     ax2.invert_yaxis()
     for bar, val in zip(bars, total_durations):
@@ -1381,7 +1026,7 @@ def plot_statistics_by_project(projects, project_stats):
                        for proj in projects]
     bars = ax3.barh(projects, total_ann_dur_id, color=colors)
     ax3.set_xlabel('Total Annotated Duration (hours)', fontsize=12)
-    ax3.set_title('Total Annotated Duration by Project', fontsize=13, fontweight='bold')
+    ax3.set_title('c) Total Annotated Duration by Project', fontsize=13, fontweight='bold')
     ax3.tick_params(axis='both', labelsize=10)
     ax3.invert_yaxis()
     for bar, val in zip(bars, total_ann_dur_id):
@@ -1394,7 +1039,7 @@ def plot_statistics_by_project(projects, project_stats):
     num_anns_id = [project_stats[proj]['num_anns_identification'] for proj in projects]
     bars = ax4.barh(projects, num_anns_id, color=colors)
     ax4.set_xlabel('Number of Annotations', fontsize=12)
-    ax4.set_title('Class-Level Annotations per Project', fontsize=13, fontweight='bold')
+    ax4.set_title('d) Class-Level Annotations per Project', fontsize=13, fontweight='bold')
     ax4.tick_params(axis='both', labelsize=10)
     ax4.invert_yaxis()
     for bar, val in zip(bars, num_anns_id):
@@ -1407,7 +1052,7 @@ def plot_statistics_by_project(projects, project_stats):
     num_anns_species = [project_stats[proj]['num_anns_species'] for proj in projects]
     bars = ax5.barh(projects, num_anns_species, color=colors)
     ax5.set_xlabel('Number of Annotations', fontsize=12)
-    ax5.set_title('Species-Level Annotations per Project', fontsize=13, fontweight='bold')
+    ax5.set_title('e) Species-Level Annotations per Project', fontsize=13, fontweight='bold')
     ax5.tick_params(axis='both', labelsize=10)
     ax5.invert_yaxis()
     for bar, val in zip(bars, num_anns_species):
@@ -1420,7 +1065,7 @@ def plot_statistics_by_project(projects, project_stats):
     num_species = [len(project_stats[proj]['species_set']) for proj in projects]
     bars = ax6.barh(projects, num_species, color=colors)
     ax6.set_xlabel('Number of Unique Species', fontsize=12)
-    ax6.set_title('Species Diversity Identified per Project', fontsize=13, fontweight='bold')
+    ax6.set_title('f) Species Diversity Identified per Project', fontsize=13, fontweight='bold')
     ax6.tick_params(axis='both', labelsize=10)
     ax6.invert_yaxis()
     for bar, val in zip(bars, num_species):
@@ -1452,11 +1097,8 @@ def main():
     print(f"Total sounds: {len(sounds)}")
 
     plot_species_bar(annotations, categories, top_n=20)
-    plot_species_bar(annotations, categories, top_n=50, suffix="_top50")
     plot_top_species_examples(annotations, categories, sounds)
     plot_annotation_scenarios()  # Uses annotations_identification.json internally
-    plot_complete_audio(annotations, categories, sounds)
-    plot_audios_by_project_time_of_day()  # Uses annotations_identification.json internally
     plot_most_annotated_audio_time_of_day()  # Single audio with most annotations
 
 
