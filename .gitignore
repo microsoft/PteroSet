@@ -13,9 +13,4 @@ data/audios*
 data/labels*
 data/predictions/
 data/all_original_labels/
-plot_spectrograms_from_predictions.py
-create_segmented_folds.py
-prepare_segmented_splits.py
-create_nonoverlapping_test.py
-filter_windows_by_segments.py
 CLAUDE.md
