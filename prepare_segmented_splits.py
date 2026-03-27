@@ -32,7 +32,9 @@ def create_splits_from_windows(
     sounds = {s['id']: s for s in annotations['sounds']}
     
     # Build list of dicts with necessary fields
-    from inference import spectrogram_filename
+    def spectrogram_filename(sound_path, start_sample, end_sample):
+        base = os.path.splitext(os.path.basename(sound_path))[0]
+        return f"{base}_{start_sample}_{end_sample}.npy"
     
     data = []
     for w in windows:

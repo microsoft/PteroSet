@@ -24,15 +24,13 @@ import argparse
 from dataclasses import dataclass, field
 from typing import Optional, List
 import os
-from pathlib import Path
-
 import torch
 from torch.utils.data import DataLoader
 from torchinfo import summary
 import numpy as np
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 
 # Import from PytorchWildlife core library
 from PytorchWildlife.models.bioacoustics import ResNetClassifier

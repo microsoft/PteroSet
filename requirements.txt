@@ -4,3 +4,9 @@ lightning
 omegaconf
 librosa
 torchinfo
+scikit-learn
+matplotlib
+pandas
+numpy
+tqdm
+requests

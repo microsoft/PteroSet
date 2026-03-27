@@ -22,7 +22,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-import soundfile as sf
 import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import precision_recall_curve, auc, confusion_matrix
@@ -86,7 +85,6 @@ def evaluate_fold(
         use_mixup=False,
     )
     
-    from train import SpectrogramDataModule
     dm = SpectrogramDataModule(dm_cfg)
     dm.setup()
     

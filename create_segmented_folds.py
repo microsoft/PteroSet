@@ -51,7 +51,9 @@ def create_segmented_folds(windows_file, config, output_suffix="_segmented"):
     sounds = {s['id']: s for s in annotations['sounds']}
     
     # Build data with all needed fields
-    from inference import spectrogram_filename
+    def spectrogram_filename(sound_path, start_sample, end_sample):
+        base = os.path.splitext(os.path.basename(sound_path))[0]
+        return f"{base}_{start_sample}_{end_sample}.npy"
     
     data = []
     for w in windows:
