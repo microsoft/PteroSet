@@ -141,11 +141,13 @@ def run_windows(config: DomainConfig) -> List[dict]:
     return windows
 
 
-def run_segment_windows(config: DomainConfig, windows: List[dict], segment_duration_sec: int = 10) -> List[dict]:
+def run_segment_windows(config: DomainConfig, windows: List[dict], segment_duration_sec: int = 10, version: str = "v3") -> List[dict]:
     """Filter windows that cross segment boundaries and save segmented JSON.
 
     Keeps only windows whose start and end fall within the same fixed-length
-    segment (default 10 s).  Reassigns sequential window IDs.
+    segment (default 10 s).  Uses per-project segment strides to handle
+    projects like PPA1 where consecutive segments overlap (1 s crossfade,
+    stride = 9 s).  Reassigns sequential window IDs.
     """
     print(f"\n{'='*60}")
     print(f"Step: Segment Windows (filter boundary-crossing windows)")
@@ -154,7 +156,7 @@ def run_segment_windows(config: DomainConfig, windows: List[dict], segment_durat
     output_dir = config.paths.data_root
     segmented_path = os.path.join(
         output_dir,
-        f"windows_mapping_{config.audio.overlap_sec}overlap_segmented.json"
+        f"windows_mapping_{config.audio.overlap_sec}overlap_segmented_{version}.json"
     )
 
     if os.path.exists(segmented_path):
@@ -164,17 +166,67 @@ def run_segment_windows(config: DomainConfig, windows: List[dict], segment_durat
         print(f"Loaded {len(segmented)} segmented windows")
     else:
         sample_rate = config.audio.sample_rate
-        segment_samples = segment_duration_sec * sample_rate
+        segment_duration_samples = segment_duration_sec * sample_rate
+
+        # Load annotations to determine per-sound segment stride.
+        # PPA1 recordings use a 1 s crossfade between consecutive 10 s
+        # segments, so the stride between segment starts is 9 s instead of 10 s.
+        with open(config.paths.annotations_path, 'r') as f:
+            annotations_data = json.load(f)
+
+        sound_info = {s['id']: s for s in annotations_data['sounds']}
+        PPA1_STRIDE_SEC = 9
+        DEFAULT_STRIDE_SEC = segment_duration_sec
+
+        sound_stride = {}
+        for sid, sound in sound_info.items():
+            if sound.get('project') == 'PPA1':
+                sound_stride[sid] = PPA1_STRIDE_SEC * sample_rate
+            else:
+                sound_stride[sid] = DEFAULT_STRIDE_SEC * sample_rate
 
         print(f"Filtering with segment_duration={segment_duration_sec}s, sample_rate={sample_rate}")
+        print(f"  PPA1 stride: {PPA1_STRIDE_SEC}s, default stride: {DEFAULT_STRIDE_SEC}s")
         print(f"Input windows: {len(windows)}")
+
+        # Determine dataset name for each sound from annotations
+        sound_dataset = {}
+        for sid, sound in sound_info.items():
+            # Use the project field from annotations; fall back to
+            # matching config.datasets against the file path.
+            proj = sound.get('project')
+            if proj and proj in config.datasets:
+                sound_dataset[sid] = proj
+            else:
+                for dataset_name in config.datasets:
+                    if dataset_name in sound['file_name_path']:
+                        sound_dataset[sid] = dataset_name
+                        break
 
         segmented = []
         for w in windows:
-            start_seg = w['start'] // segment_samples
-            end_seg = (w['end'] - 1) // segment_samples
-            if start_seg == end_seg:
-                segmented.append(w)
+            start = w['start']
+            end = w['end']
+            stride = sound_stride.get(w['sound_id'], DEFAULT_STRIDE_SEC * sample_rate)
+
+            # Find candidate segment index and check containment.
+            # With overlapping segments (stride < duration), a window's start
+            # could belong to segment seg_idx or the previous one.
+            seg_idx = start // stride
+            fits = False
+            for k in (seg_idx, seg_idx - 1):
+                if k < 0:
+                    continue
+                seg_start = k * stride
+                seg_end = seg_start + segment_duration_samples
+                if start >= seg_start and end <= seg_end:
+                    fits = True
+                    break
+
+            if fits:
+                w_copy = dict(w)
+                w_copy['dataset'] = sound_dataset.get(w['sound_id'])
+                segmented.append(w_copy)
 
         # Reassign sequential window IDs
         for i, w in enumerate(segmented):
@@ -249,7 +301,7 @@ def run_spectrograms(config: DomainConfig, windows: List[dict]) -> None:
     print("Spectrogram computation complete!")
 
 
-def run_splits(config: DomainConfig, windows: List[dict]) -> None:
+def run_splits(config: DomainConfig, windows: List[dict], folds_subdir: str = "folds_segmented_v3") -> None:
     """Create leave-one-project-out cross-validation splits.
 
     Uses segmented windows.  Train/val keep overlaps within segments;
@@ -264,9 +316,11 @@ def run_splits(config: DomainConfig, windows: List[dict]) -> None:
 
     spectrograms_dir = config.paths.spectrograms_dir
     output_dir = config.paths.data_root
+    folds_base = os.path.join(output_dir, folds_subdir)
+    os.makedirs(folds_base, exist_ok=True)
 
     print(f"Spectrograms directory: {spectrograms_dir}")
-    print(f"Output directory: {output_dir}")
+    print(f"Output directory: {folds_base}")
     print(f"Split parameters:")
     print(f"  - val_size: {config.splits.val_size}")
     print(f"  - random_state: {config.splits.random_state}")
@@ -333,7 +387,7 @@ def run_splits(config: DomainConfig, windows: List[dict]) -> None:
 
     for fold_idx, held_out_project in enumerate(projects):
         fold_name = f"fold_{fold_idx}_{held_out_project}_segmented"
-        fold_dir = os.path.join(output_dir, fold_name)
+        fold_dir = os.path.join(folds_base, fold_name)
         os.makedirs(fold_dir, exist_ok=True)
 
         print(f"\n{'-'*50}")
@@ -400,7 +454,7 @@ def run_splits(config: DomainConfig, windows: List[dict]) -> None:
     print(f"\n{'='*60}")
     print("SUMMARY")
     print(f"{'='*60}")
-    print(f"Created {len(projects)} folds under: {output_dir}")
+    print(f"Created {len(projects)} folds under: {folds_base}")
     for stat in fold_stats:
         print(f"  {stat['fold']}")
         print(f"    Train: {stat['train']}, Val: {stat['val']}, Test: {stat['test']}")
@@ -422,12 +476,12 @@ def load_windows_if_exists(config: DomainConfig) -> Optional[List[dict]]:
     return None
 
 
-def load_segmented_windows_if_exists(config: DomainConfig) -> Optional[List[dict]]:
+def load_segmented_windows_if_exists(config: DomainConfig, version: str = "v3") -> Optional[List[dict]]:
     """Load segmented windows from file if they exist."""
     output_dir = config.paths.data_root
     segmented_path = os.path.join(
         output_dir,
-        f"windows_mapping_{config.audio.overlap_sec}overlap_segmented.json"
+        f"windows_mapping_{config.audio.overlap_sec}overlap_segmented_{version}.json"
     )
 
     if os.path.exists(segmented_path):

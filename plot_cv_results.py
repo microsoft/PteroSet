@@ -38,7 +38,7 @@ from PytorchWildlife.data.bioacoustics.bioacoustics_configs import load_config
 # Projects in the statistics plot (in order): MAP1, PPA1, PPA2, PPA3, PPA4
 # Fold 0→PPA1, Fold 1→PPA2, Fold 2→PPA3, Fold 3→PPA4, Fold 4→MAP1
 _PROJECT_COLORS = plt.cm.magma(np.linspace(0.2, 0.85, 5))
-FOLD_PROJECT_NAMES = ['PPA1', 'PPA2', 'PPA3', 'PPA4', 'MAP1']
+FOLD_PROJECT_NAMES = ['MAP1', 'PPA1', 'PPA2', 'PPA3', 'PPA4']
 FOLD_COLORS = [
     _PROJECT_COLORS[1],  # Fold 0 → PPA1
     _PROJECT_COLORS[2],  # Fold 1 → PPA2
