@@ -387,7 +387,7 @@ def plot_qualitative_results(
 
                     pending_rects.append((ax, x0, y0, x1 - x0, y1 - y0))
 
-    fig.suptitle(f"Qualitative Examples — Fold {fold_index} - {project_name}",
+    fig.suptitle(f"Qualitative Examples",
                  fontsize=15, fontweight='bold')
     plt.tight_layout()
 

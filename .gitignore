@@ -16,3 +16,6 @@ data/all_original_labels/
 CLAUDE.md
 compare_inference_strategies.py
 Draft Paper*
+.claude/
+paper/
+reports/
