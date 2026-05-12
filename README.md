@@ -96,11 +96,11 @@ python train.py --config data/config.yaml \
 
 # Cross-validation across all 5 folds
 python train.py --config data/config.yaml \
-    --cross_validation --fold_dir data/folds_segmented_v2
+    --cross_validation --fold_dir data/folds_segmented
 
 # Train a specific fold
 python train.py --config data/config.yaml \
-    --cross_validation --fold_dir data/folds_segmented_v2 --fold 0
+    --cross_validation --fold_dir data/folds_segmented --fold 0
 
 # Finetune from a pretrained checkpoint
 python train.py --config data/config.yaml \
@@ -117,7 +117,7 @@ python train.py --config data/config.yaml \
 
 # Aggregate cross-validation results and plot precision-recall curves
 python plot_cv_results.py \
-    --fold_dir data/folds_segmented_v2 \
+    --fold_dir data/folds_segmented \
     --config data/config.yaml \
     --checkpoint_dir checkpoints
 ```

@@ -147,7 +147,6 @@ def run_segment_windows(
     config: DomainConfig,
     windows: List[dict],
     segment_duration_sec: int = 10,
-    version: str = "v3",
 ) -> List[dict]:
     """Filter windows that cross segment boundaries and save segmented JSON.
 
@@ -155,6 +154,9 @@ def run_segment_windows(
     segment (default 10 s).  Uses per-project segment strides to handle
     projects like PPA1 where consecutive segments overlap (1 s crossfade,
     stride = 9 s).  Reassigns sequential window IDs.
+
+    Labels are re-derived from the current annotations JSON to ensure they
+    reflect the latest annotation state, regardless of upstream cache.
     """
     print(f"\n{'=' * 60}")
     print("Step: Segment Windows (filter boundary-crossing windows)")
@@ -163,7 +165,7 @@ def run_segment_windows(
     output_dir = config.paths.data_root
     segmented_path = os.path.join(
         output_dir,
-        f"windows_mapping_{config.audio.overlap_sec}overlap_segmented_{version}.json",
+        f"windows_mapping_{config.audio.overlap_sec}overlap_segmented.json",
     )
 
     if os.path.exists(segmented_path):
@@ -334,7 +336,7 @@ def run_spectrograms(config: DomainConfig, windows: List[dict]) -> None:
 
 
 def run_splits(
-    config: DomainConfig, windows: List[dict], folds_subdir: str = "folds_segmented_v3"
+    config: DomainConfig, windows: List[dict], folds_subdir: str = "folds_segmented"
 ) -> None:
     """Create leave-one-project-out cross-validation splits.
 
@@ -536,13 +538,13 @@ def load_windows_if_exists(config: DomainConfig) -> Optional[List[dict]]:
 
 
 def load_segmented_windows_if_exists(
-    config: DomainConfig, version: str = "v3"
+    config: DomainConfig,
 ) -> Optional[List[dict]]:
     """Load segmented windows from file if they exist."""
     output_dir = config.paths.data_root
     segmented_path = os.path.join(
         output_dir,
-        f"windows_mapping_{config.audio.overlap_sec}overlap_segmented_{version}.json",
+        f"windows_mapping_{config.audio.overlap_sec}overlap_segmented.json",
     )
 
     if os.path.exists(segmented_path):
@@ -588,12 +590,6 @@ Examples:
         choices=ALL_STEPS,
         help="Steps to run (default: all)",
     )
-    parser.add_argument(
-        "--version",
-        type=str,
-        default="v3",
-        help="Version suffix for segmented windows mapping and folds dir (default: v3)",
-    )
 
     args = parser.parse_args()
 
@@ -620,7 +616,7 @@ Examples:
         if windows is None:
             print("\nError: Windows not found. Run 'windows' step first.")
             return
-        segmented_windows = run_segment_windows(config, windows, version=args.version)
+        segmented_windows = run_segment_windows(config, windows)
 
     # --- spectrograms (uses raw windows so all spectrograms are computed) ---
     if "spectrograms" in args.steps:
@@ -634,9 +630,7 @@ Examples:
     # --- splits (uses segmented windows) ---
     if "splits" in args.steps:
         if segmented_windows is None:
-            segmented_windows = load_segmented_windows_if_exists(
-                config, version=args.version
-            )
+            segmented_windows = load_segmented_windows_if_exists(config)
         if segmented_windows is None:
             print(
                 "\nError: Segmented windows not found. Run 'segment_windows' step first."
@@ -645,7 +639,6 @@ Examples:
         run_splits(
             config,
             segmented_windows,
-            folds_subdir=f"folds_segmented_{args.version}",
         )
 
     print(f"\n{'=' * 60}")
