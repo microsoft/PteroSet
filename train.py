@@ -22,7 +22,7 @@ Usage:
 
 import argparse
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional
 import os
 import torch
 from torch.utils.data import DataLoader
@@ -45,6 +45,7 @@ from PytorchWildlife.data.bioacoustics.bioacoustics_configs import load_config
 @dataclass
 class DataModuleConfig:
     """Configuration for the SpectrogramDataModule."""
+
     train_csv: str = "train_split.csv"
     val_csv: str = "val_split.csv"
     test_csv: str = "test_split.csv"
@@ -119,30 +120,30 @@ class SpectrogramDataModule(pl.LightningDataModule):
             target_size=self.cfg.target_size,
             normalize=self.cfg.normalize,
         )
-        if hasattr(self.cfg, 'pcen'):
-            dataset_kwargs['pcen'] = self.cfg.pcen
+        if hasattr(self.cfg, "pcen"):
+            dataset_kwargs["pcen"] = self.cfg.pcen
         if self.cfg.num_classes is not None:
-            dataset_kwargs['num_classes'] = self.cfg.num_classes
+            dataset_kwargs["num_classes"] = self.cfg.num_classes
 
         if self.cfg.train_csv is not None:
             self.train_ds = BioacousticsDataset(
                 csv_path=self.cfg.train_csv,
                 transform=self.train_transform,
                 is_training=True,
-                **dataset_kwargs
+                **dataset_kwargs,
             )
         if self.cfg.val_csv is not None:
             self.val_ds = BioacousticsDataset(
                 csv_path=self.cfg.val_csv,
                 transform=self.eval_transform,
                 is_training=False,
-                **dataset_kwargs
+                **dataset_kwargs,
             )
         self.test_ds = BioacousticsDataset(
             csv_path=self.cfg.test_csv,
             transform=self.eval_transform,
             is_training=False,
-            **dataset_kwargs
+            **dataset_kwargs,
         )
 
     @property
@@ -161,8 +162,7 @@ class SpectrogramDataModule(pl.LightningDataModule):
     def train_dataloader(self) -> DataLoader:
         if self.is_binary and self.cfg.use_mixup:
             collate_fn = MixUpCollator(
-                mixup_prob=self.cfg.mixup_prob,
-                mixup_alpha=self.cfg.mixup_alpha
+                mixup_prob=self.cfg.mixup_prob, mixup_alpha=self.cfg.mixup_alpha
             )
         else:
             collate_fn = None
@@ -198,23 +198,25 @@ class SpectrogramDataModule(pl.LightningDataModule):
 
 def train_single_fold(args, fold_num=None):
     """Train and evaluate on a single fold."""
-    
+
     # Determine fold-specific paths
     if args.cross_validation and args.fold_dir:
-        fold_dirs = sorted([d for d in os.listdir(args.fold_dir) if d.startswith('fold_')])
+        fold_dirs = sorted(
+            [d for d in os.listdir(args.fold_dir) if d.startswith("fold_")]
+        )
         if fold_num is not None:
             fold_path = os.path.join(args.fold_dir, fold_dirs[fold_num])
         else:
             fold_path = args.fold_dir
-        
-        train_csv = os.path.join(fold_path, 'train_split.csv')
-        val_csv = os.path.join(fold_path, 'val_split.csv')
-        test_csv = os.path.join(fold_path, 'test_split.csv')
+
+        train_csv = os.path.join(fold_path, "train_split.csv")
+        val_csv = os.path.join(fold_path, "val_split.csv")
+        test_csv = os.path.join(fold_path, "test_split.csv")
     else:
         train_csv = args.train_csv
         val_csv = args.val_csv
         test_csv = args.test_csv
-    
+
     # Create DataModule config
     dm_cfg = DataModuleConfig(
         train_csv=train_csv,
@@ -256,18 +258,28 @@ def train_single_fold(args, fold_num=None):
     )
 
     if fold_num is not None:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"FOLD {fold_num} / 4")
-        print(f"{'='*60}")
-    
-    print(f"\nClassification mode: {'Binary' if num_classes == 2 else f'Multiclass ({num_classes} classes)'}")
-    if fold_num == 0 or fold_num is None:  # Only print summary for first fold or single run
-        print(summary(model, input_size=(args.batch_size, dm.in_channels, *args.target_size)))
+        print(f"{'=' * 60}")
+
+    print(
+        f"\nClassification mode: {'Binary' if num_classes == 2 else f'Multiclass ({num_classes} classes)'}"
+    )
+    if (
+        fold_num == 0 or fold_num is None
+    ):  # Only print summary for first fold or single run
+        print(
+            summary(
+                model, input_size=(args.batch_size, dm.in_channels, *args.target_size)
+            )
+        )
 
     # Callbacks & logging
     mode = "min" if args.monitor_metric == "val/loss" else "max"
 
-    ckpt_dir = f"checkpoints/fold_{fold_num}" if fold_num is not None else "checkpoints"
+    ckpt_dir = (
+        f"{args.ckpt_dir}/fold_{fold_num}" if fold_num is not None else args.ckpt_dir
+    )
     os.makedirs(ckpt_dir, exist_ok=True)
 
     ckpt_cb = ModelCheckpoint(
@@ -276,7 +288,9 @@ def train_single_fold(args, fold_num=None):
         mode=mode,
         save_top_k=1,
         save_last=True,
-        filename="resnet-finetune-{epoch:02d}" if args.finetune else "resnet-{epoch:02d}",
+        filename="resnet-finetune-{epoch:02d}"
+        if args.finetune
+        else "resnet-{epoch:02d}",
     )
 
     early_cb = None
@@ -325,7 +339,7 @@ def train_single_fold(args, fold_num=None):
 
             trainer.fit(model, datamodule=dm)
             model.test_csv_path = test_csv
-            test_results = trainer.test(model, datamodule=dm, ckpt_path='best')
+            test_results = trainer.test(model, datamodule=dm, ckpt_path="best")
             print("Finetune completed.")
             print(f"Best ckpt: {ckpt_cb.best_model_path}")
             print(f"Best score: {ckpt_cb.best_model_score}")
@@ -333,27 +347,41 @@ def train_single_fold(args, fold_num=None):
             model.test_csv_path = test_csv
             test_results = trainer.test(model, datamodule=dm)
             print(f"Test completed from checkpoint {args.ckpt_path}")
-    
+
     return test_results[0] if test_results else {}
 
 
 def main():
     pl.seed_everything(42)
 
-    parser = argparse.ArgumentParser(description="Unified training for bioacoustics classification")
+    parser = argparse.ArgumentParser(
+        description="Unified training for bioacoustics classification"
+    )
 
     # Config file (optional)
-    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
+    parser.add_argument(
+        "--config", type=str, default=None, help="Path to YAML config file"
+    )
 
     # Cross-validation arguments
-    parser.add_argument("--cross_validation", action="store_true", 
-                        help="Enable cross-validation mode")
-    parser.add_argument("--fold_dir", type=str, default=None,
-                        help="Base directory containing fold_X subdirectories")
-    parser.add_argument("--fold", type=int, default=None,
-                        help="Specific fold to train (0-4), if None trains all folds")
-    parser.add_argument("--num_folds", type=int, default=5,
-                        help="Total number of folds (default: 5)")
+    parser.add_argument(
+        "--cross_validation", action="store_true", help="Enable cross-validation mode"
+    )
+    parser.add_argument(
+        "--fold_dir",
+        type=str,
+        default=None,
+        help="Base directory containing fold_X subdirectories",
+    )
+    parser.add_argument(
+        "--fold",
+        type=int,
+        default=None,
+        help="Specific fold to train (0-4), if None trains all folds",
+    )
+    parser.add_argument(
+        "--num_folds", type=int, default=5, help="Total number of folds (default: 5)"
+    )
 
     # Data arguments
     parser.add_argument("--train_csv", type=str, default=None)
@@ -366,8 +394,12 @@ def main():
     # Model arguments
     parser.add_argument("--num_classes", type=int, default=2)
     parser.add_argument("--class_names", type=str, nargs="+", default=None)
-    parser.add_argument("--backbone", type=str, default="resnet18",
-                        choices=["resnet18", "resnet34", "resnet50"])
+    parser.add_argument(
+        "--backbone",
+        type=str,
+        default="resnet18",
+        choices=["resnet18", "resnet34", "resnet50"],
+    )
 
     # Training arguments
     parser.add_argument("--batch_size", type=int, default=32)
@@ -377,11 +409,21 @@ def main():
     parser.add_argument("--label_smoothing", type=float, default=0.0)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--ckpt_path", type=str, default=None)
+    parser.add_argument(
+        "--ckpt_dir",
+        type=str,
+        default="checkpoints",
+        help="Root directory for checkpoint output (default: checkpoints)",
+    )
     parser.add_argument("--monitor_metric", type=str, default="val/f1")
-    parser.add_argument("--finetune", type=lambda x: (str(x).lower() == 'true'), default=False)
+    parser.add_argument(
+        "--finetune", type=lambda x: str(x).lower() == "true", default=False
+    )
 
     # Preprocessing
-    parser.add_argument("--normalize", type=lambda x: (str(x).lower() == 'true'), default=True)
+    parser.add_argument(
+        "--normalize", type=lambda x: str(x).lower() == "true", default=True
+    )
     parser.add_argument("--pcen", action="store_true")
 
     # Binary-specific
@@ -390,8 +432,12 @@ def main():
     parser.add_argument("--temperature", type=float, default=1.0)
 
     # Freezing
-    parser.add_argument("--freeze_backbone", type=str, default="none",
-                        choices=["none", "all", "early", "layer1", "layer2", "layer3"])
+    parser.add_argument(
+        "--freeze_backbone",
+        type=str,
+        default="none",
+        choices=["none", "all", "early", "layer1", "layer2", "layer3"],
+    )
     parser.add_argument("--backbone_lr_ratio", type=float, default=1.0)
 
     # Augmentation
@@ -431,14 +477,20 @@ def main():
     # Cross-validation mode
     if args.cross_validation:
         if not args.fold_dir:
-            raise ValueError("--fold_dir must be specified when using --cross_validation")
-        
-        fold_dirs = sorted([d for d in os.listdir(args.fold_dir) if d.startswith('fold_')])
-        
+            raise ValueError(
+                "--fold_dir must be specified when using --cross_validation"
+            )
+
+        fold_dirs = sorted(
+            [d for d in os.listdir(args.fold_dir) if d.startswith("fold_")]
+        )
+
         if args.fold is not None:
             # Train on specific fold
             if args.fold >= len(fold_dirs):
-                raise ValueError(f"Fold {args.fold} not found. Available folds: 0-{len(fold_dirs)-1}")
+                raise ValueError(
+                    f"Fold {args.fold} not found. Available folds: 0-{len(fold_dirs) - 1}"
+                )
             results = train_single_fold(args, fold_num=args.fold)
             print(f"\nFold {args.fold} Results:")
             for key, value in results.items():
@@ -449,23 +501,23 @@ def main():
             for fold_num in range(len(fold_dirs)):
                 results = train_single_fold(args, fold_num=fold_num)
                 all_results.append(results)
-            
+
             # Aggregate results
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print("CROSS-VALIDATION SUMMARY")
-            print(f"{'='*60}\n")
-            
+            print(f"{'=' * 60}\n")
+
             if all_results:
                 metrics = list(all_results[0].keys())
                 print(f"{'Metric':<30} {'Mean':<12} {'Std':<12}")
                 print("-" * 60)
-                
+
                 for metric in metrics:
                     values = [r[metric] for r in all_results]
                     mean_val = np.mean(values)
                     std_val = np.std(values)
                     print(f"{metric:<30} {mean_val:<12.4f} {std_val:<12.4f}")
-                
+
                 print("\nPer-Fold Results:")
                 for fold_num, results in enumerate(all_results):
                     print(f"\n  Fold {fold_num}:")
