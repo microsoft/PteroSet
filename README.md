@@ -134,7 +134,9 @@ birds_bioacoustics/
 ├── train.py                     # Model training and evaluation
 ├── prepare_dataset.py           # Dataset preparation pipeline
 ├── plot_cv_results.py           # Cross-validation results and PR curves
-└── requirements.txt
+├── requirements.txt             # Python dependencies
+├── LICENSE.txt                  # MIT License
+└── SECURITY.md                  # Microsoft security policy
 ```
 
 ## Pipeline Overview
