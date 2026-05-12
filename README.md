@@ -1,4 +1,4 @@
-# A standardized annotated passive acoustic dataset for tropical bird monitoring 
+# A strongly annotated passive acoustic dataset for tropical bird monitoring 
 
 This work is under submission to the Bioacoustics Data collection of *Scientific Data* journal.
 
