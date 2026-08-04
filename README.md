@@ -81,9 +81,36 @@ python prepare_dataset.py --config data/config.yaml --steps windows segment_wind
 Available steps:
 - `stats` — Display dataset statistics
 - `windows` — Build sliding windows from annotations
-- `segment_windows` — Filter windows to respect segment boundaries (removes windows that cross 10 s boundaries)
+- `segment_windows` — Filter windows to stay within 10-second snapshots, using
+  the project geometry: PPA1 snapshot starts are 9 seconds apart (1-second
+  overlap), while MAP1/PPA2/PPA3/PPA4 starts are 10 seconds apart
 - `spectrograms` — Compute mel spectrograms on GPU
 - `splits` — Create leave-one-project-out folds (segmented windows, non-overlapping test sets)
+
+### Segment manifest and extraction
+
+The segment manifest makes the same snapshot geometry explicit in a portable
+CSV and supports extracting a segment by its stable identifier:
+
+```bash
+# Generate a version 1 manifest
+python data/segment_manifest.py generate \
+    --annotations data/annotations_identification.json \
+    --metadata data/metadata.csv \
+    --output data/segment_manifest_v1.csv
+
+# Extract one manifest row to a WAV
+python data/segment_manifest.py extract \
+    --manifest data/segment_manifest_v1.csv \
+    --segment-id SEGMENT_ID \
+    --audio-root data/audios_192khz \
+    --output segment.wav
+```
+
+Metadata is optional when generating a manifest. Run
+`python data/segment_manifest.py --help` for all options. See the
+[segment manifest v1 implementation note](docs/implementation/segment-manifest-v1/README.md)
+for the schema, time semantics, and validation expectations.
 
 ### 6. Train Model
 
