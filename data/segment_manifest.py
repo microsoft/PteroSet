@@ -8,16 +8,24 @@ import argparse
 import csv
 from dataclasses import asdict, dataclass
 import json
+import math
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Union
 from urllib.parse import quote
 import wave
 
-from data.segment_utils import (
-    SEGMENT_DURATION_SEC,
-    iter_full_segments,
-    segment_stride_sec,
-)
+if __package__:
+    from .segment_utils import (
+        SEGMENT_DURATION_SEC,
+        iter_full_segments,
+        segment_stride_sec,
+    )
+else:
+    from segment_utils import (
+        SEGMENT_DURATION_SEC,
+        iter_full_segments,
+        segment_stride_sec,
+    )
 
 
 MANIFEST_VERSION = "1"
@@ -80,7 +88,7 @@ def _portable_audio_file(file_name_path: object) -> str:
         raise ValueError(
             f"sound file_name_path must be a portable relative path: {file_name_path!r}"
         )
-    return PurePosixPath(*parts).as_posix()
+    return parts[-1]
 
 
 def _metadata_by_audio_file(
@@ -171,14 +179,27 @@ def generate_manifest_records(
 
         audio_file = _portable_audio_file(sound["file_name_path"])
         metadata_join_key = PurePosixPath(audio_file).name
-        if metadata_csv is not None and metadata_join_key in seen_metadata_join_keys:
+        if metadata_join_key in seen_metadata_join_keys:
             raise ValueError(
                 "annotation sounds contain duplicate audio filenames, making "
-                f"the metadata join ambiguous for {metadata_join_key!r}"
+                f"the manifest path ambiguous for {metadata_join_key!r}"
             )
         seen_metadata_join_keys.add(metadata_join_key)
         metadata = metadata_by_file.get(metadata_join_key, {})
-        project = _metadata_value(sound, metadata, "project", "project_name")
+        annotation_project = str(sound.get("project") or "").strip()
+        metadata_project = str(
+            metadata.get("project") or metadata.get("project_name") or ""
+        ).strip()
+        if (
+            annotation_project
+            and metadata_project
+            and annotation_project != metadata_project
+        ):
+            raise ValueError(
+                f"sound {sound_id!r} project conflicts with metadata: "
+                f"{annotation_project!r} != {metadata_project!r}"
+            )
+        project = metadata_project or annotation_project
         if not project:
             raise ValueError(
                 f"sound {sound_id!r} has no project in annotations or metadata"
@@ -273,6 +294,8 @@ def read_manifest(manifest_csv: Union[str, Path]) -> List[SegmentRecord]:
             raise ValueError(f"manifest CSV is missing fields: {', '.join(missing)}")
 
         records = []
+        seen_segment_ids = set()
+        seen_sound_segments = set()
         for row_number, row in enumerate(reader, start=2):
             try:
                 record = SegmentRecord(
@@ -301,8 +324,66 @@ def read_manifest(manifest_csv: Union[str, Path]) -> List[SegmentRecord]:
                 raise ValueError(
                     f"unsupported manifest version {record.manifest_version!r}"
                 )
+            _validate_manifest_record(record, row_number)
+            if record.segment_id in seen_segment_ids:
+                raise ValueError(
+                    f"manifest CSV row {row_number} duplicates segment_id "
+                    f"{record.segment_id!r}"
+                )
+            sound_segment = (record.sound_id, record.segment_index)
+            if sound_segment in seen_sound_segments:
+                raise ValueError(
+                    f"manifest CSV row {row_number} duplicates sound_id and "
+                    "segment_index"
+                )
+            seen_segment_ids.add(record.segment_id)
+            seen_sound_segments.add(sound_segment)
             records.append(record)
     return records
+
+
+def _validate_manifest_record(record: SegmentRecord, row_number: int) -> None:
+    """Validate the geometry and identity fields of one manifest row."""
+    prefix = f"manifest CSV row {row_number}"
+    if not record.segment_id:
+        raise ValueError(f"{prefix} has an empty segment_id")
+    if record.segment_index < 0:
+        raise ValueError(f"{prefix} has a negative segment_index")
+    if record.source_sample_rate <= 0:
+        raise ValueError(f"{prefix} has a non-positive source_sample_rate")
+
+    expected_stride = segment_stride_sec(record.project)
+    expected_start_sec = record.segment_index * expected_stride
+    expected_end_sec = expected_start_sec + SEGMENT_DURATION_SEC
+    expected_start_sample = round(expected_start_sec * record.source_sample_rate)
+    expected_end_sample = round(expected_end_sec * record.source_sample_rate)
+    expected_id = (
+        f"segment-v{MANIFEST_VERSION}-"
+        f"{quote(record.sound_id, safe='')}-{record.segment_index:04d}"
+    )
+
+    if record.segment_id != expected_id:
+        raise ValueError(f"{prefix} has an inconsistent segment_id")
+    if not math.isclose(
+        record.segment_duration_sec, SEGMENT_DURATION_SEC, abs_tol=1e-9
+    ):
+        raise ValueError(f"{prefix} has an invalid segment_duration_sec")
+    if not math.isclose(
+        record.segment_stride_sec, expected_stride, abs_tol=1e-9
+    ):
+        raise ValueError(f"{prefix} has an invalid segment_stride_sec")
+    if not math.isclose(
+        record.start_sec_in_file, expected_start_sec, abs_tol=1e-9
+    ) or not math.isclose(
+        record.end_sec_in_file, expected_end_sec, abs_tol=1e-9
+    ):
+        raise ValueError(f"{prefix} has inconsistent second offsets")
+    if (
+        record.start_sample != expected_start_sample
+        or record.end_sample != expected_end_sample
+    ):
+        raise ValueError(f"{prefix} has inconsistent sample offsets")
+    _portable_audio_file(record.audio_file)
 
 
 def select_segment(
@@ -341,6 +422,9 @@ def extract_segment(
 ) -> Path:
     """Extract one manifest segment from a PCM WAV with exact frame boundaries."""
     audio_path = _audio_path(audio_root, record.audio_file)
+    output_path = Path(output_wav).resolve()
+    if output_path == audio_path:
+        raise ValueError("output WAV must not overwrite the source WAV")
     expected_frames = record.end_sample - record.start_sample
     if record.start_sample < 0 or expected_frames <= 0:
         raise ValueError("manifest segment sample boundaries are invalid")
@@ -362,7 +446,6 @@ def extract_segment(
         channels = source.getnchannels()
         sample_width = source.getsampwidth()
 
-    output_path = Path(output_wav)
     with wave.open(str(output_path), "wb") as output:
         output.setnchannels(channels)
         output.setsampwidth(sample_width)

@@ -118,7 +118,7 @@ def test_manifest_is_deterministic_sorted_and_joins_metadata(tmp_path):
     assert len(records) == 96
     assert records[0].sound_id == "2"
     assert records[0].segment_index == 0
-    assert records[0].audio_file == "audios/PPA2.wav"
+    assert records[0].audio_file == "PPA2.wav"
     assert records[0].date_recorded == "2024-02-03"
     assert records[0].location_id == "location-2"
     assert records[0].recorder_id == "recorder-2"
@@ -158,6 +158,30 @@ def test_duplicate_metadata_audio_file_is_rejected(tmp_path):
         generate_manifest_records(annotations, metadata)
 
 
+def test_conflicting_annotation_and_metadata_projects_are_rejected(tmp_path):
+    annotations = tmp_path / "annotations.json"
+    metadata = tmp_path / "metadata.csv"
+    _write_annotations(
+        annotations,
+        [
+            {
+                "id": 1,
+                "file_name_path": "audio.wav",
+                "duration": 10,
+                "sample_rate": 100,
+                "project": "PPA1",
+            }
+        ],
+    )
+    _write_metadata(
+        metadata,
+        [{"audio_file": "audio.wav", "project_name": "PPA2"}],
+    )
+
+    with pytest.raises(ValueError, match="project conflicts"):
+        generate_manifest_records(annotations, metadata)
+
+
 def test_ambiguous_annotation_filename_metadata_join_is_rejected(tmp_path):
     annotations = tmp_path / "annotations.json"
     metadata = tmp_path / "metadata.csv"
@@ -185,7 +209,7 @@ def test_ambiguous_annotation_filename_metadata_join_is_rejected(tmp_path):
         [{"audio_file": "audio.wav", "project_name": "PPA2"}],
     )
 
-    with pytest.raises(ValueError, match="metadata join ambiguous"):
+    with pytest.raises(ValueError, match="manifest path ambiguous"):
         generate_manifest_records(annotations, metadata)
 
 
@@ -290,6 +314,30 @@ def test_sample_rate_mismatch_is_rejected(tmp_path):
         extract_segment(record, audio_root, tmp_path / "output.wav")
 
 
+def test_extract_does_not_overwrite_source_wav(tmp_path):
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    source_wav = audio_root / "source.wav"
+    _write_wav(source_wav, sample_rate=100, samples=[0] * 1000)
+    annotations = tmp_path / "annotations.json"
+    _write_annotations(
+        annotations,
+        [
+            {
+                "id": 1,
+                "file_name_path": "source.wav",
+                "duration": 10,
+                "sample_rate": 100,
+                "project": "PPA2",
+            }
+        ],
+    )
+    record = generate_manifest_records(annotations)[0]
+
+    with pytest.raises(ValueError, match="must not overwrite"):
+        extract_segment(record, audio_root, source_wav)
+
+
 def test_absolute_manifest_audio_path_cannot_ignore_audio_root(tmp_path):
     annotations = tmp_path / "annotations.json"
     _write_annotations(
@@ -311,6 +359,34 @@ def test_absolute_manifest_audio_path_cannot_ignore_audio_root(tmp_path):
 
     with pytest.raises(ValueError, match="relative to audio_root"):
         extract_segment(absolute_record, tmp_path, tmp_path / "output.wav")
+
+
+def test_read_manifest_rejects_inconsistent_geometry(tmp_path):
+    annotations = tmp_path / "annotations.json"
+    manifest = tmp_path / "segments.csv"
+    _write_annotations(
+        annotations,
+        [
+            {
+                "id": 1,
+                "file_name_path": "source.wav",
+                "duration": 10,
+                "sample_rate": 100,
+                "project": "PPA2",
+            }
+        ],
+    )
+    generate_manifest(annotations, manifest)
+
+    rows = list(csv.DictReader(manifest.open()))
+    rows[0]["end_sample"] = "999"
+    with manifest.open("w", newline="") as manifest_file:
+        writer = csv.DictWriter(manifest_file, fieldnames=rows[0])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(ValueError, match="inconsistent sample offsets"):
+        read_manifest(manifest)
 
 
 def test_shared_containment_matches_default_and_overlapping_geometry():
