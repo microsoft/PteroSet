@@ -24,6 +24,10 @@ from PytorchWildlife.data.bioacoustics.bioacoustics_configs import (
     DomainConfig,
 )
 from PytorchWildlife.data.bioacoustics.bioacoustics_windows import build_windows
+from data.segment_utils import (
+    PPA1_SEGMENT_STRIDE_SEC,
+    window_is_contained_in_segment,
+)
 
 
 def spectrogram_filename(sound_path, start_sample, end_sample):
@@ -175,8 +179,6 @@ def run_segment_windows(
         print(f"Loaded {len(segmented)} segmented windows")
     else:
         sample_rate = config.audio.sample_rate
-        segment_duration_samples = segment_duration_sec * sample_rate
-
         # Load annotations to determine per-sound segment stride.
         # PPA1 recordings use a 1 s crossfade between consecutive 10 s
         # segments, so the stride between segment starts is 9 s instead of 10 s.
@@ -192,21 +194,12 @@ def run_segment_windows(
         for a in annotations_data["annotations"]:
             sound_to_anns[a["sound_id"]].append((a["t_min"], a["t_max"]))
 
-        PPA1_STRIDE_SEC = 9
-        DEFAULT_STRIDE_SEC = segment_duration_sec
-
-        sound_stride = {}
-        for sid, sound in sound_info.items():
-            if sound.get("project") == "PPA1":
-                sound_stride[sid] = PPA1_STRIDE_SEC * sample_rate
-            else:
-                sound_stride[sid] = DEFAULT_STRIDE_SEC * sample_rate
-
         print(
             f"Filtering with segment_duration={segment_duration_sec}s, sample_rate={sample_rate}"
         )
         print(
-            f"  PPA1 stride: {PPA1_STRIDE_SEC}s, default stride: {DEFAULT_STRIDE_SEC}s"
+            f"  PPA1 stride: {PPA1_SEGMENT_STRIDE_SEC:g}s, "
+            f"default stride: {segment_duration_sec}s"
         )
         print(f"Input windows: {len(windows)}")
 
@@ -228,21 +221,14 @@ def run_segment_windows(
         for w in windows:
             start = w["start"]
             end = w["end"]
-            stride = sound_stride.get(w["sound_id"], DEFAULT_STRIDE_SEC * sample_rate)
-
-            # Find candidate segment index and check containment.
-            # With overlapping segments (stride < duration), a window's start
-            # could belong to segment seg_idx or the previous one.
-            seg_idx = start // stride
-            fits = False
-            for k in (seg_idx, seg_idx - 1):
-                if k < 0:
-                    continue
-                seg_start = k * stride
-                seg_end = seg_start + segment_duration_samples
-                if start >= seg_start and end <= seg_end:
-                    fits = True
-                    break
+            project = sound_info.get(w["sound_id"], {}).get("project")
+            fits = window_is_contained_in_segment(
+                start_sample=start,
+                end_sample=end,
+                project=project,
+                sample_rate=sample_rate,
+                segment_duration_sec=segment_duration_sec,
+            )
 
             if fits:
                 w_copy = dict(w)
