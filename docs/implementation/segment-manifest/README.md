@@ -1,10 +1,10 @@
-# Segment Manifest v1
+# Segment Manifest
 
 ## Purpose and rationale
 
 PteroSet source WAVs concatenate time-lapse snapshots. Treating every project
 as a sequence of non-overlapping 10-second blocks loses the actual geometry of
-PPA1, whose adjacent snapshots overlap by one second. The version 1 segment
+PPA1, whose adjacent snapshots overlap by one second. The segment
 manifest records each snapshot explicitly so filtering, extraction, and review
 use one shared rule:
 
@@ -22,8 +22,8 @@ end_sec_in_file   = start_sec_in_file + 10
 
 The manifest provides a stable segment identifier and both second- and
 sample-based ranges. This avoids duplicating project-specific boundary logic
-in downstream tools. Version 1 rows describe complete 10-second snapshots; a
-trailing interval shorter than 10 seconds is not a version 1 segment.
+in downstream tools. Rows describe complete 10-second snapshots; a trailing
+interval shorter than 10 seconds is not a segment.
 
 ## Time semantics
 
@@ -46,12 +46,11 @@ ranges from sharing a sample.
 The CSV header is fixed and ordered as follows:
 
 ```text
-manifest_version,segment_id,sound_id,segment_index,audio_file,project,start_sec_in_file,end_sec_in_file,start_sample,end_sample,source_sample_rate,segment_duration_sec,segment_stride_sec,date_recorded,location_id,recorder_id
+segment_id,sound_id,segment_index,audio_file,project,start_sec_in_file,end_sec_in_file,start_sample,end_sample,source_sample_rate,segment_duration_sec,segment_stride_sec,date_recorded,location_id,recorder_id
 ```
 
 | Field | Meaning |
 |-------|---------|
-| `manifest_version` | Schema version. Version 1 rows use `1`. |
 | `segment_id` | Unique, stable identifier used to select a segment for extraction. Treat it as opaque. |
 | `sound_id` | Identifier of the source sound in the annotations JSON. |
 | `segment_index` | Zero-based snapshot index within the source sound. |
@@ -62,7 +61,7 @@ manifest_version,segment_id,sound_id,segment_index,audio_file,project,start_sec_
 | `start_sample` | Snapshot start offset in source samples. |
 | `end_sample` | Exclusive snapshot end offset in source samples. |
 | `source_sample_rate` | Sample rate of the source WAV in samples per second. |
-| `segment_duration_sec` | Snapshot duration; `10` for version 1. |
+| `segment_duration_sec` | Snapshot duration; `10` seconds. |
 | `segment_stride_sec` | Start-to-start spacing; `9` for PPA1 and `10` for the other projects. |
 | `date_recorded` | Optional recording-level metadata copied from the metadata CSV; not a per-snapshot timestamp. |
 | `location_id` | Optional location metadata copied from the metadata CSV. |
@@ -83,7 +82,7 @@ Generate a manifest from annotations and optional recording metadata:
 python data/segment_manifest.py generate \
     --annotations data/annotations_identification.json \
     --metadata data/metadata.csv \
-    --output data/segment_manifest_v1.csv
+    --output data/segment_manifest.csv
 ```
 
 Without metadata:
@@ -91,14 +90,14 @@ Without metadata:
 ```bash
 python data/segment_manifest.py generate \
     --annotations data/annotations_identification.json \
-    --output data/segment_manifest_v1.csv
+    --output data/segment_manifest.csv
 ```
 
 Extract one segment by identifier:
 
 ```bash
 python data/segment_manifest.py extract \
-    --manifest data/segment_manifest_v1.csv \
+    --manifest data/segment_manifest.csv \
     --segment-id SEGMENT_ID \
     --audio-root data/audios_192khz \
     --output segment.wav
@@ -113,8 +112,7 @@ the source WAV files.
 
 A generator or consumer should verify:
 
-- the CSV header exactly matches the version 1 schema and every row has
-  `manifest_version = 1`;
+- the CSV header exactly matches the documented schema;
 - `segment_id` is non-empty and unique;
 - each source sound has ordered, zero-based `segment_index` values;
 - `segment_duration_sec` is 10 and `segment_stride_sec` is 9 only for PPA1,
@@ -135,9 +133,7 @@ A generator or consumer should verify:
 
 For PPA1, a useful geometry check is that segment 0 covers `[0, 10)`, segment 1
 covers `[9, 19)`, and their one-second overlap is intentional. For another
-project, segment 0 covers `[0, 10)` and segment 1 covers `[10, 20)`.
-
-## Reviewer-response wording
+project, segment 0 covers `[0, 10)` and segment 1 covers `[10, 20)`.## Reviewer-response wording
 
 Suggested concise wording for reviews or change summaries:
 

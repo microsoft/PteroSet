@@ -28,10 +28,8 @@ else:
     )
 
 
-MANIFEST_VERSION = "1"
-DEFAULT_MANIFEST_FILENAME = f"segment_manifest_v{MANIFEST_VERSION}.csv"
+DEFAULT_MANIFEST_FILENAME = "segment_manifest.csv"
 MANIFEST_FIELDS = [
-    "manifest_version",
     "segment_id",
     "sound_id",
     "segment_index",
@@ -55,7 +53,6 @@ REQUIRED_SOUND_FIELDS = ("id", "file_name_path", "duration", "sample_rate")
 class SegmentRecord:
     """One original time-lapse segment within a concatenated audio file."""
 
-    manifest_version: str
     segment_id: str
     sound_id: str
     segment_index: int
@@ -224,9 +221,8 @@ def generate_manifest_records(
         ):
             records.append(
                 SegmentRecord(
-                    manifest_version=MANIFEST_VERSION,
                     segment_id=(
-                        f"segment-v{MANIFEST_VERSION}-"
+                        "segment-"
                         f"{quote(sound_id, safe='')}-{bounds.segment_index:04d}"
                     ),
                     sound_id=sound_id,
@@ -260,7 +256,7 @@ def generate_manifest_records(
 def write_manifest(
     records: Iterable[SegmentRecord], output_csv: Union[str, Path]
 ) -> None:
-    """Write records as a deterministic, versioned CSV manifest."""
+    """Write records as a deterministic CSV manifest."""
     with open(output_csv, "w", newline="", encoding="utf-8") as output_file:
         writer = csv.DictWriter(
             output_file, fieldnames=MANIFEST_FIELDS, lineterminator="\n"
@@ -299,7 +295,6 @@ def read_manifest(manifest_csv: Union[str, Path]) -> List[SegmentRecord]:
         for row_number, row in enumerate(reader, start=2):
             try:
                 record = SegmentRecord(
-                    manifest_version=row["manifest_version"],
                     segment_id=row["segment_id"],
                     sound_id=row["sound_id"],
                     segment_index=int(row["segment_index"]),
@@ -320,10 +315,6 @@ def read_manifest(manifest_csv: Union[str, Path]) -> List[SegmentRecord]:
                 raise ValueError(
                     f"manifest CSV row {row_number} contains invalid values"
                 ) from error
-            if record.manifest_version != MANIFEST_VERSION:
-                raise ValueError(
-                    f"unsupported manifest version {record.manifest_version!r}"
-                )
             _validate_manifest_record(record, row_number)
             if record.segment_id in seen_segment_ids:
                 raise ValueError(
@@ -358,8 +349,7 @@ def _validate_manifest_record(record: SegmentRecord, row_number: int) -> None:
     expected_start_sample = round(expected_start_sec * record.source_sample_rate)
     expected_end_sample = round(expected_end_sec * record.source_sample_rate)
     expected_id = (
-        f"segment-v{MANIFEST_VERSION}-"
-        f"{quote(record.sound_id, safe='')}-{record.segment_index:04d}"
+        f"segment-{quote(record.sound_id, safe='')}-{record.segment_index:04d}"
     )
 
     if record.segment_id != expected_id:
@@ -465,7 +455,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     generate_parser = subparsers.add_parser(
-        "generate", help="generate a versioned segment-offset CSV"
+        "generate", help="generate a segment-offset CSV"
     )
     generate_parser.add_argument("--annotations", required=True)
     generate_parser.add_argument(

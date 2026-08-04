@@ -9,6 +9,8 @@ import wave
 import pytest
 
 from data.segment_manifest import (
+    DEFAULT_MANIFEST_FILENAME,
+    MANIFEST_FIELDS,
     extract_segment,
     generate_manifest,
     generate_manifest_records,
@@ -127,7 +129,9 @@ def test_manifest_is_deterministic_sorted_and_joins_metadata(tmp_path):
     assert records[-1].start_sec_in_file == 423
     assert records[-1].end_sec_in_file == 433
     assert records[-1].segment_stride_sec == 9
-    assert records[0].segment_id == "segment-v1-2-0000"
+    assert records[0].segment_id == "segment-2-0000"
+    assert DEFAULT_MANIFEST_FILENAME == "segment_manifest.csv"
+    assert "manifest_version" not in MANIFEST_FIELDS
     assert manifest_a.read_bytes() == manifest_b.read_bytes()
 
 
@@ -266,7 +270,7 @@ def test_extracts_exact_wav_frames_and_cli_round_trip(tmp_path):
         )
         == 0
     )
-    record = select_segment(read_manifest(manifest), "segment-v1-source-0001")
+    record = select_segment(read_manifest(manifest), "segment-source-0001")
     assert (
         main(
             [

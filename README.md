@@ -93,15 +93,15 @@ The segment manifest makes the same snapshot geometry explicit in a portable
 CSV and supports extracting a segment by its stable identifier:
 
 ```bash
-# Generate a version 1 manifest
+# Generate the segment manifest
 python data/segment_manifest.py generate \
     --annotations data/annotations_identification.json \
     --metadata data/metadata.csv \
-    --output data/segment_manifest_v1.csv
+    --output data/segment_manifest.csv
 
 # Extract one manifest row to a WAV
 python data/segment_manifest.py extract \
-    --manifest data/segment_manifest_v1.csv \
+    --manifest data/segment_manifest.csv \
     --segment-id SEGMENT_ID \
     --audio-root data/audios_192khz \
     --output segment.wav
@@ -109,7 +109,7 @@ python data/segment_manifest.py extract \
 
 Metadata is optional when generating a manifest. Run
 `python data/segment_manifest.py --help` for all options. See the
-[segment manifest v1 implementation note](docs/implementation/segment-manifest-v1/README.md)
+[segment manifest implementation note](docs/implementation/segment-manifest/README.md)
 for the schema, time semantics, and validation expectations.
 
 ### 6. Train Model
