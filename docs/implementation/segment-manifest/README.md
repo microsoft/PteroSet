@@ -133,14 +133,4 @@ A generator or consumer should verify:
 
 For PPA1, a useful geometry check is that segment 0 covers `[0, 10)`, segment 1
 covers `[9, 19)`, and their one-second overlap is intentional. For another
-project, segment 0 covers `[0, 10)` and segment 1 covers `[10, 20)`.## Reviewer-response wording
-
-Suggested concise wording for reviews or change summaries:
-
-> We now use one project-aware snapshot rule for both window filtering and the
-> segment manifest. All snapshots are 10 seconds long; PPA1 starts snapshots
-> every 9 seconds because adjacent snapshots overlap by 1 second, whereas
-> MAP1/PPA2/PPA3/PPA4 start snapshots every 10 seconds. Manifest offsets refer
-> to positions within each concatenated WAV, not acquisition timestamps, and
-> `date_recorded` alone cannot recover the real time of an individual
-> time-lapse snapshot.
+project, segment 0 covers `[0, 10)` and segment 1 covers `[10, 20)`.
