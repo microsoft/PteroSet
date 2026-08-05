@@ -109,7 +109,7 @@ python data/segment_manifest.py extract \
 
 Metadata is optional when generating a manifest. Run
 `python data/segment_manifest.py --help` for all options. See the
-[segment manifest implementation note](docs/implementation/segment-manifest/README.md)
+[segment manifest implementation note](data/segment-manifest-note.md)
 for the schema, time semantics, and validation expectations.
 
 ### 6. Train Model
