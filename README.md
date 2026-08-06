@@ -4,7 +4,7 @@ This work is under submission to the Bioacoustics Data collection of *Scientific
 
 Pipeline for bird vocalization detection and classification from audio recordings using spectrogram-based deep learning models. Built on top of the [PytorchWildlife](https://github.com/microsoft/CameraTraps) library, it covers data downloading, annotation creation, dataset preparation, model training, cross-validation, and evaluation.
 
-**Dataset**: [PteroSet](https://zenodo.org/records/19137071) (Zenodo)
+**Dataset**: [PteroSet](https://zenodo.org/records/21829388) (Zenodo)
 
 ## Quick Start
 
