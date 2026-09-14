@@ -48,6 +48,28 @@ WINDOW_SIZE_SEC = 5.0
 AGGREGATION_METHODS = ['weighted_mean', 'max', 'unweighted_mean']
 
 
+def validate_historical_artifact_paths(
+    folds_base: str,
+    checkpoint_dir: str,
+    mapping_version: str,
+) -> None:
+    """Reject fold/checkpoint roots that cannot match the fixed mapping version."""
+    expected_folds = f"folds_segmented_{mapping_version}"
+    expected_checkpoints = f"checkpoints_{mapping_version}"
+    actual_folds = os.path.basename(os.path.normpath(folds_base))
+    actual_checkpoints = os.path.basename(os.path.normpath(checkpoint_dir))
+    if actual_folds != expected_folds:
+        raise ValueError(
+            f"{mapping_version} mapping requires fold directory "
+            f"{expected_folds!r}, got {actual_folds!r}"
+        )
+    if actual_checkpoints != expected_checkpoints:
+        raise ValueError(
+            f"{mapping_version} mapping requires checkpoint directory "
+            f"{expected_checkpoints!r}, got {actual_checkpoints!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Step 1: Generate overlapping test CSVs
 # ---------------------------------------------------------------------------
@@ -833,6 +855,49 @@ def print_summary(summary_df: pd.DataFrame):
     print("\n" + "=" * 100)
 
 
+def _write_dataframe_atomically(dataframe: pd.DataFrame, destination: str) -> None:
+    staging_path = f"{destination}.staging"
+    try:
+        dataframe.to_csv(staging_path, index=False)
+        os.replace(staging_path, destination)
+    finally:
+        if os.path.lexists(staging_path):
+            os.unlink(staging_path)
+
+
+def publish_comparison_tables(
+    output_dir: str,
+    all_results: pd.DataFrame,
+    boundary_results: pd.DataFrame,
+    summary: pd.DataFrame,
+) -> None:
+    """Publish current-run tables and remove obsolete optional output."""
+    os.makedirs(output_dir, exist_ok=True)
+    results_path = os.path.join(output_dir, "comparison_results.csv")
+    summary_path = os.path.join(output_dir, "comparison_summary.csv")
+    boundary_path = os.path.join(
+        output_dir,
+        "comparison_boundary_sensitivity.csv",
+    )
+
+    _write_dataframe_atomically(all_results, results_path)
+    _write_dataframe_atomically(summary, summary_path)
+    if boundary_results.empty:
+        if os.path.lexists(boundary_path):
+            if not (os.path.isfile(boundary_path) or os.path.islink(boundary_path)):
+                raise ValueError(
+                    f"Refusing to remove non-file optional output: {boundary_path}"
+                )
+            os.unlink(boundary_path)
+    else:
+        _write_dataframe_atomically(boundary_results, boundary_path)
+
+    print(f"\nAll results saved to: {results_path}")
+    print(f"Summary saved to: {summary_path}")
+    if not boundary_results.empty:
+        print(f"Boundary sensitivity saved to: {boundary_path}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -889,6 +954,11 @@ def load_annotation_metrics_input(
 
 def main():
     args = build_arg_parser().parse_args()
+    validate_historical_artifact_paths(
+        args.fold_dir,
+        args.checkpoint_dir,
+        HISTORICAL_MAPPING_VERSION,
+    )
 
     config = load_config(args.config)
     sample_rate = config.audio.sample_rate
@@ -954,20 +1024,14 @@ def main():
         [result for result in (results_5s, results_1s) if not result.empty],
         ignore_index=True,
     )
-    results_path = os.path.join(args.output_dir, "comparison_results.csv")
-    all_results.to_csv(results_path, index=False)
-    print(f"\nAll results saved to: {results_path}")
-
-    if not results_boundary.empty:
-        boundary_path = os.path.join(args.output_dir, "comparison_boundary_sensitivity.csv")
-        results_boundary.to_csv(boundary_path, index=False)
-        print(f"Boundary sensitivity saved to: {boundary_path}")
-
     # Summary
     summary = compute_summary(all_results)
-    summary_path = os.path.join(args.output_dir, "comparison_summary.csv")
-    summary.to_csv(summary_path, index=False)
-    print(f"Summary saved to: {summary_path}")
+    publish_comparison_tables(
+        args.output_dir,
+        all_results,
+        results_boundary,
+        summary,
+    )
 
     print_summary(summary)
 

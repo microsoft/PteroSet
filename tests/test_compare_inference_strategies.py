@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pandas as pd
 
 import compare_inference_strategies
 
@@ -191,6 +192,63 @@ def test_annotations_must_explicitly_match_historical_mapping_version(tmp_path):
         "v3",
     )
     assert loaded == {"sounds": [], "annotations": []}
+
+
+@pytest.mark.parametrize(
+    ("fold_dir", "checkpoint_dir", "mismatched_artifact"),
+    [
+        ("data/folds_segmented_v5", "checkpoints_v3", "fold directory"),
+        ("data/folds_segmented_v3", "checkpoints_v5", "checkpoint directory"),
+    ],
+)
+def test_rejects_non_v3_folds_or_checkpoints(
+    fold_dir,
+    checkpoint_dir,
+    mismatched_artifact,
+):
+    with pytest.raises(ValueError, match=mismatched_artifact):
+        compare_inference_strategies.validate_historical_artifact_paths(
+            fold_dir,
+            checkpoint_dir,
+            "v3",
+        )
+
+
+def test_second_run_without_annotations_removes_stale_boundary_output(tmp_path):
+    output_dir = tmp_path / "comparison"
+    first_results = pd.DataFrame(
+        [
+            {"resolution": "5s", "f1": 0.5},
+            {"resolution": "1s", "f1": 0.4},
+            {"resolution": "1s_interior", "f1": 0.6},
+        ]
+    )
+    first_boundary = pd.DataFrame([{"distance": 1, "f1": 0.4}])
+    first_summary = pd.DataFrame([{"resolution": "5s", "f1_mean": 0.5}])
+
+    compare_inference_strategies.publish_comparison_tables(
+        str(output_dir),
+        first_results,
+        first_boundary,
+        first_summary,
+    )
+    boundary_path = output_dir / "comparison_boundary_sensitivity.csv"
+    assert boundary_path.exists()
+
+    second_results = pd.DataFrame([{"resolution": "5s", "f1": 0.7}])
+    second_summary = pd.DataFrame([{"resolution": "5s", "f1_mean": 0.7}])
+    compare_inference_strategies.publish_comparison_tables(
+        str(output_dir),
+        second_results,
+        pd.DataFrame(),
+        second_summary,
+    )
+
+    assert not boundary_path.exists()
+    published = pd.read_csv(output_dir / "comparison_results.csv")
+    assert published.to_dict("records") == [
+        {"resolution": "5s", "f1": 0.7}
+    ]
 
 
 def test_rejects_missing_project_identity(tmp_path, monkeypatch):
