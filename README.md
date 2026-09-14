@@ -71,21 +71,31 @@ Outputs `annotations_species.json` or `annotations_identification.json` in COCO 
 ### 5. Prepare Dataset
 
 ```bash
-# Full pipeline (stats, windows, segment_windows, spectrograms, splits)
-python prepare_dataset.py --config data/config.yaml
+# Full v5 pipeline (stats, segment_windows, spectrograms, splits)
+python prepare_dataset.py --config data/config.yaml --version v5
 
 # Or run specific steps
-python prepare_dataset.py --config data/config.yaml --steps windows segment_windows spectrograms
+python prepare_dataset.py --config data/config.yaml \
+    --steps segment_windows spectrograms splits --version v5
 ```
 
 Available steps:
 - `stats` — Display dataset statistics
-- `windows` — Build sliding windows from annotations
-- `segment_windows` — Filter windows to stay within 10-second snapshots, using
-  the project geometry: PPA1 snapshot starts are 9 seconds apart (1-second
-  overlap), while MAP1/PPA2/PPA3/PPA4 starts are 10 seconds apart
+- `windows` — Build the legacy recording-level window mapping; this is
+  optional and is not part of the default pipeline
+- `segment_windows` — Generate segmented windows directly from current
+  annotations and project geometry: PPA1 snapshot starts are 9 seconds apart
+  (1-second overlap), while MAP1/PPA2/PPA3/PPA4 starts are 10 seconds apart
 - `spectrograms` — Compute mel spectrograms on GPU
-- `splits` — Create leave-one-project-out folds (segmented windows, non-overlapping test sets)
+- `splits` — Validate that every segmented window has a spectrogram, then
+  replace the versioned leave-one-project-out folds as a complete staged set
+  (segmented train/validation windows, non-overlapping test windows)
+
+The corrected mapping is
+`data/windows_mapping_4.0overlap_segmented_v5.json`, and its folds are written
+to `data/folds_segmented_v5/`. Revisions v1-v4 are historical and read-only.
+The v4 checkpoints were trained on the old 160,244-window mapping and are not
+corrected v5 results.
 
 ### Segment manifest and extraction
 
@@ -123,11 +133,11 @@ python train.py --config data/config.yaml \
 
 # Cross-validation across all 5 folds
 python train.py --config data/config.yaml \
-    --cross_validation --fold_dir data/folds_segmented
+    --cross_validation --fold_dir data/folds_segmented_v5
 
 # Train a specific fold
 python train.py --config data/config.yaml \
-    --cross_validation --fold_dir data/folds_segmented --fold 0
+    --cross_validation --fold_dir data/folds_segmented_v5 --fold 0
 
 # Finetune from a pretrained checkpoint
 python train.py --config data/config.yaml \
@@ -144,9 +154,9 @@ python train.py --config data/config.yaml \
 
 # Aggregate cross-validation results and plot precision-recall curves
 python plot_cv_results.py \
-    --fold_dir data/folds_segmented \
+    --fold_dir data/folds_segmented_v5 \
     --config data/config.yaml \
-    --checkpoint_dir checkpoints
+    --checkpoint_dir checkpoints_v5
 ```
 
 ## Project Structure
@@ -171,10 +181,11 @@ birds_bioacoustics/
 ```
 Audio files (48 kHz) + RAVEN label files
   → Annotations (COCO JSON)
-  → Sliding windows (5s, 4s overlap)
-  → Segmented windows (filter boundary-crossing windows)
+  → Segmented windows generated directly from annotations
+    (5s windows, 4s overlap, project-aware 10s segment geometry)
   → Mel spectrograms (.npy)
-  → Leave-one-project-out CV splits (non-overlapping test)
+  → Validated, versioned leave-one-project-out CV splits
+    (non-overlapping test)
   → ResNet classifier (binary or multiclass)
   → Evaluation with aggregated metrics
 ```

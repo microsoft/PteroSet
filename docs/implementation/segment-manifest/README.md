@@ -111,11 +111,19 @@ python prepare_dataset.py --config data/config.yaml \
 ```
 
 The split-only command then rebuilds generated `fold_*` directories under
-`data/folds_segmented_v5/`, using only windows whose spectrogram files already
-exist. It does not create missing spectrograms. Therefore, split-only
-regeneration is safe after the v5 spectrogram set is complete, but running it
-against only the old v4 spectrogram set would omit the recovered windows from
-the CSVs.
+`data/folds_segmented_v5/`. It does not create missing spectrograms. Before
+writing any fold, it validates the complete window set: every sound must be
+known, every project in `config.datasets` must be represented with no
+unexpected projects, and every segmented window must have a spectrogram file.
+Missing v5 spectrograms cause the command to fail instead of silently omitting
+windows.
+
+Fold CSVs are generated in an invocation-owned staging directory. Only after
+all folds succeed does the pipeline replace `data/folds_segmented_v5/` with
+the staged tree; if activation fails, it restores the previous fold
+directory. Validation or generation failure leaves the existing folds
+untouched. The segmented mapping is likewise written through a unique staging
+file and replaced only after the JSON write completes.
 
 ### Verified expected counts
 
