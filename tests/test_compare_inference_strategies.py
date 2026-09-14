@@ -1,6 +1,7 @@
 """Focused tests for historical inference comparison inputs."""
 
 import csv
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +14,7 @@ def _config(tmp_path: Path):
     spectrograms = tmp_path / "spectrograms"
     spectrograms.mkdir()
     return SimpleNamespace(
-        audio=SimpleNamespace(sample_rate=100),
+        audio=SimpleNamespace(sample_rate=100, overlap_sec=4.0),
         paths=SimpleNamespace(
             data_root=str(tmp_path),
             spectrograms_dir=str(spectrograms),
@@ -21,10 +22,27 @@ def _config(tmp_path: Path):
     )
 
 
-def _fold_dirs(tmp_path: Path) -> Path:
+def _fold_dirs(tmp_path: Path, sounds: dict | None = None) -> Path:
     folds = tmp_path / "folds"
+    sounds = sounds or {}
     for fold_idx, project in enumerate(compare_inference_strategies.PROJECTS):
-        (folds / f"fold_{fold_idx}_{project}_segmented").mkdir(parents=True)
+        fold_dir = folds / f"fold_{fold_idx}_{project}_segmented"
+        fold_dir.mkdir(parents=True)
+        with (fold_dir / "test_split.csv").open("w", newline="") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=["sound_id", "sound_filename", "dataset", "project"],
+            )
+            writer.writeheader()
+            for sound_id, sound_filename in sounds.get(project, []):
+                writer.writerow(
+                    {
+                        "sound_id": sound_id,
+                        "sound_filename": sound_filename,
+                        "dataset": project,
+                        "project": project,
+                    }
+                )
     return folds
 
 
@@ -38,7 +56,14 @@ def test_generates_csvs_without_metadata_using_window_dataset_and_sound_fallback
     monkeypatch,
 ):
     config = _config(tmp_path)
-    folds = _fold_dirs(tmp_path)
+    folds = _fold_dirs(
+        tmp_path,
+        {
+            "MAP1": [(10, "map.wav")],
+            "PPA1": [(20, "ppa1.wav")],
+        },
+    )
+    staging = tmp_path / "outputs" / "staging" / "v3"
     monkeypatch.setattr(
         compare_inference_strategies,
         "spectrogram_filename",
@@ -46,6 +71,11 @@ def test_generates_csvs_without_metadata_using_window_dataset_and_sound_fallback
     )
     for name in ("map_0_500.npy", "ppa1_0_500.npy"):
         (Path(config.paths.spectrograms_dir) / name).touch()
+    historical_before = {
+        path.relative_to(folds): path.read_bytes()
+        for path in folds.rglob("*")
+        if path.is_file()
+    }
 
     windows = [
         {
@@ -64,18 +94,12 @@ def test_generates_csvs_without_metadata_using_window_dataset_and_sound_fallback
             "label": 0,
         },
     ]
-    annotations = {
-        "sounds": [
-            {"id": 10, "file_name_path": "map.wav", "project": "MAP1"},
-            {"id": 20, "file_name_path": "ppa1.wav", "project": "PPA1"},
-        ]
-    }
-
     paths = compare_inference_strategies.generate_overlapping_test_csvs(
         config,
         windows,
         str(folds),
-        annotations,
+        str(staging),
+        "v3",
     )
 
     map_rows = _read_rows(paths[0])
@@ -87,11 +111,24 @@ def test_generates_csvs_without_metadata_using_window_dataset_and_sound_fallback
         ("PPA1", "PPA1")
     ]
     assert not (tmp_path / "metadata.csv").exists()
+    provenance = json.loads((staging / "provenance.json").read_text())
+    assert provenance["mapping_version"] == "v3"
+    assert provenance["historical_fold_dir"] == str(folds.resolve())
+    historical_after = {
+        path.relative_to(folds): path.read_bytes()
+        for path in folds.rglob("*")
+        if path.is_file()
+    }
+    assert historical_after == historical_before
+    assert all(not Path(path).is_relative_to(folds) for path in paths.values())
 
 
-def test_rejects_conflicting_window_and_annotation_projects(tmp_path, monkeypatch):
+def test_rejects_conflicting_window_and_historical_fold_projects(
+    tmp_path,
+    monkeypatch,
+):
     config = _config(tmp_path)
-    folds = _fold_dirs(tmp_path)
+    folds = _fold_dirs(tmp_path, {"PPA1": [(10, "sound.wav")]})
     monkeypatch.setattr(
         compare_inference_strategies,
         "spectrogram_filename",
@@ -106,24 +143,65 @@ def test_rejects_conflicting_window_and_annotation_projects(tmp_path, monkeypatc
             "end": 500,
         }
     ]
-    annotations = {
-        "sounds": [
-            {"id": 10, "file_name_path": "sound.wav", "project": "PPA1"}
-        ]
-    }
-
     with pytest.raises(ValueError, match="Project mismatch"):
         compare_inference_strategies.generate_overlapping_test_csvs(
             config,
             windows,
             str(folds),
-            annotations,
+            str(tmp_path / "staging"),
+            "v3",
         )
+
+
+def test_annotations_are_disabled_by_default_without_opening_current_file(
+    monkeypatch,
+):
+    args = compare_inference_strategies.build_arg_parser().parse_args([])
+    assert args.annotations is None
+    assert args.annotations_version is None
+
+    def fail_open(*_args, **_kwargs):
+        raise AssertionError("annotations must not be opened implicitly")
+
+    monkeypatch.setattr("builtins.open", fail_open)
+    assert (
+        compare_inference_strategies.load_annotation_metrics_input(
+            args.annotations,
+            args.annotations_version,
+            "v3",
+        )
+        is None
+    )
+
+
+def test_annotations_must_explicitly_match_historical_mapping_version(tmp_path):
+    annotations = tmp_path / "current_annotations.json"
+    annotations.write_text('{"sounds": [], "annotations": []}')
+
+    with pytest.raises(ValueError, match="must be 'v3'"):
+        compare_inference_strategies.load_annotation_metrics_input(
+            str(annotations),
+            "v5",
+            "v3",
+        )
+
+    loaded = compare_inference_strategies.load_annotation_metrics_input(
+        str(annotations),
+        "v3",
+        "v3",
+    )
+    assert loaded == {"sounds": [], "annotations": []}
 
 
 def test_rejects_missing_project_identity(tmp_path, monkeypatch):
     config = _config(tmp_path)
     folds = _fold_dirs(tmp_path)
+    fold_csv = (
+        folds / "fold_0_MAP1_segmented" / "test_split.csv"
+    )
+    fold_csv.write_text(
+        "sound_id,sound_filename,dataset,project\n10,sound.wav,,\n"
+    )
     monkeypatch.setattr(
         compare_inference_strategies,
         "spectrogram_filename",
@@ -132,16 +210,13 @@ def test_rejects_missing_project_identity(tmp_path, monkeypatch):
     windows = [
         {"window_id": 1, "sound_id": 10, "start": 0, "end": 500}
     ]
-    annotations = {
-        "sounds": [{"id": 10, "file_name_path": "sound.wav"}]
-    }
-
     with pytest.raises(ValueError, match="No project identity"):
         compare_inference_strategies.generate_overlapping_test_csvs(
             config,
             windows,
             str(folds),
-            annotations,
+            str(tmp_path / "staging"),
+            "v3",
         )
 
 
@@ -163,13 +238,21 @@ def test_rejects_window_with_unknown_sound(tmp_path):
             config,
             windows,
             str(folds),
-            {"sounds": []},
+            str(tmp_path / "staging"),
+            "v3",
         )
 
 
 def test_rejects_unsupported_project_identity(tmp_path, monkeypatch):
     config = _config(tmp_path)
     folds = _fold_dirs(tmp_path)
+    fold_csv = (
+        folds / "fold_0_MAP1_segmented" / "test_split.csv"
+    )
+    fold_csv.write_text(
+        "sound_id,sound_filename,dataset,project\n"
+        "10,sound.wav,UNKNOWN,UNKNOWN\n"
+    )
     monkeypatch.setattr(
         compare_inference_strategies,
         "spectrogram_filename",
@@ -184,16 +267,11 @@ def test_rejects_unsupported_project_identity(tmp_path, monkeypatch):
             "end": 500,
         }
     ]
-    annotations = {
-        "sounds": [
-            {"id": 10, "file_name_path": "sound.wav", "project": "UNKNOWN"}
-        ]
-    }
-
     with pytest.raises(ValueError, match="Unsupported project 'UNKNOWN'"):
         compare_inference_strategies.generate_overlapping_test_csvs(
             config,
             windows,
             str(folds),
-            annotations,
+            str(tmp_path / "staging"),
+            "v3",
         )

@@ -12,6 +12,11 @@ Evaluation at two granularities:
 
 Usage:
     python compare_inference_strategies.py --config data/config.yaml
+
+    # Enable annotation-derived metrics only with a matching v3 artifact:
+    python compare_inference_strategies.py \
+        --annotations data/annotations_identification_v3.json \
+        --annotations_version v3
 """
 
 import argparse
@@ -50,26 +55,52 @@ def generate_overlapping_test_csvs(
     config,
     segmented_windows: List[dict],
     folds_base: str,
-    annotations_data: dict,
+    staging_base: str,
+    mapping_version: str,
 ) -> Dict[int, str]:
     """Create test CSVs containing ALL segmented overlapping windows for each fold's test project.
 
     Project identity comes from each historical window's ``dataset`` field,
-    falling back to the matching annotation sound's ``project`` field.
+    checked against the matching historical fold row. Derived CSVs are written
+    only under ``staging_base``, never into the read-only historical folds.
     Returns dict mapping fold_idx -> path to overlapping test CSV.
     """
     print("\n" + "=" * 60)
     print("Step 1: Generate overlapping test CSVs")
     print("=" * 60)
 
-    sounds = {s['id']: s for s in annotations_data['sounds']}
+    folds_path = os.path.abspath(folds_base)
+    staging_path = os.path.abspath(staging_base)
+    if os.path.commonpath([folds_path, staging_path]) == folds_path:
+        raise ValueError("staging_base must be outside the historical folds directory")
+
+    sounds = {}
+    source_csvs = []
+    for fold_idx, held_out_project in enumerate(PROJECTS):
+        fold_name = f"fold_{fold_idx}_{held_out_project}_segmented"
+        source_csv = os.path.join(folds_base, fold_name, 'test_split.csv')
+        source_csvs.append(os.path.abspath(source_csv))
+        with open(source_csv, newline='') as f:
+            for row in csv.DictReader(f):
+                sound_id = str(row['sound_id'])
+                sound = {
+                    'file_name_path': row['sound_filename'],
+                    'project': row.get('project') or row.get('dataset'),
+                }
+                previous = sounds.get(sound_id)
+                if previous is not None and previous != sound:
+                    raise ValueError(
+                        f"Conflicting historical fold metadata for sound_id "
+                        f"{row['sound_id']!r}"
+                    )
+                sounds[sound_id] = sound
 
     spectrograms_dir = config.paths.spectrograms_dir
 
     # Enrich windows with spec_name, sound_filename, project
     enriched = []
     for w in segmented_windows:
-        sound = sounds.get(w['sound_id'])
+        sound = sounds.get(str(w['sound_id']))
         if sound is None:
             raise ValueError(
                 f"Window {w['window_id']} references unknown sound_id "
@@ -113,10 +144,12 @@ def generate_overlapping_test_csvs(
                   'start', 'end', 'label', 'spec_name', 'sound_filename', 'project']
 
     overlapping_csvs = {}
+    os.makedirs(staging_base, exist_ok=True)
 
     for fold_idx, held_out_project in enumerate(PROJECTS):
         fold_name = f"fold_{fold_idx}_{held_out_project}_segmented"
-        fold_dir = os.path.join(folds_base, fold_name)
+        fold_dir = os.path.join(staging_base, fold_name)
+        os.makedirs(fold_dir, exist_ok=True)
 
         test_data = [d for d in enriched if d['project'] == held_out_project]
         csv_path = os.path.join(fold_dir, 'test_split_overlapping.csv')
@@ -131,6 +164,22 @@ def generate_overlapping_test_csvs(
 
         overlapping_csvs[fold_idx] = csv_path
         print(f"  Fold {fold_idx} ({held_out_project}): {len(test_data)} overlapping windows -> {csv_path}")
+
+    provenance_path = os.path.join(staging_base, 'provenance.json')
+    with open(provenance_path, 'w') as f:
+        json.dump(
+            {
+                'mapping_version': mapping_version,
+                'mapping_source': (
+                    f"windows_mapping_{config.audio.overlap_sec}overlap"
+                    f"_segmented_{mapping_version}.json"
+                ),
+                'historical_fold_dir': folds_path,
+                'historical_test_csvs': source_csvs,
+            },
+            f,
+            indent=2,
+        )
 
     return overlapping_csvs
 
@@ -772,14 +821,59 @@ def print_summary(summary_df: pd.DataFrame):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def main():
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compare non-overlapping vs overlapping inference strategies")
     parser.add_argument("--config", type=str, default="data/config.yaml")
     parser.add_argument("--fold_dir", type=str, default="data/folds_segmented_v3")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints_v3")
-    parser.add_argument("--output_dir", type=str, default="outputs_v3")
-    parser.add_argument("--annotations", type=str, default="data/annotations_identification.json")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs_v3/inference_strategy_comparison",
+    )
+    parser.add_argument(
+        "--annotations",
+        type=str,
+        default=None,
+        help=(
+            "Explicit annotation artifact for annotation-derived metrics; "
+            "must be paired with --annotations_version v3"
+        ),
+    )
+    parser.add_argument(
+        "--annotations_version",
+        type=str,
+        default=None,
+        help="Dataset version represented by --annotations",
+    )
+    return parser
+
+
+def load_annotation_metrics_input(
+    annotations_path: str,
+    annotations_version: str,
+    mapping_version: str,
+):
+    """Load explicitly version-matched annotations or disable derived metrics."""
+    if annotations_path is None:
+        if annotations_version is not None:
+            raise ValueError("--annotations_version requires --annotations")
+        print(
+            "Annotation-derived 1-second and boundary analyses disabled: "
+            "no explicit version-matched annotations were provided"
+        )
+        return None
+    if annotations_version != mapping_version:
+        raise ValueError(
+            f"--annotations_version must be {mapping_version!r} for the "
+            f"{mapping_version} mapping and checkpoints"
+        )
+    with open(annotations_path, 'r') as f:
+        return json.load(f)
+
+
+def main():
+    args = build_arg_parser().parse_args()
 
     config = load_config(args.config)
     sample_rate = config.audio.sample_rate
@@ -797,16 +891,24 @@ def main():
         )
     print(f"Loaded {len(segmented_windows)} segmented windows")
 
-    # Load annotations
-    with open(args.annotations, 'r') as f:
-        annotations_data = json.load(f)
+    annotations_data = load_annotation_metrics_input(
+        args.annotations,
+        args.annotations_version,
+        HISTORICAL_MAPPING_VERSION,
+    )
 
     # Step 1: Generate overlapping test CSVs
+    staging_dir = os.path.join(
+        args.output_dir,
+        'staging',
+        HISTORICAL_MAPPING_VERSION,
+    )
     overlapping_csvs = generate_overlapping_test_csvs(
         config,
         segmented_windows,
         args.fold_dir,
-        annotations_data,
+        staging_dir,
+        HISTORICAL_MAPPING_VERSION,
     )
 
     # Step 2: Run inference on both strategies
@@ -816,13 +918,27 @@ def main():
 
     # Steps 3-7: Compare at both granularities
     results_5s = compare_at_5s_resolution(baseline_results, overlapping_results, sample_rate)
-    results_1s = compare_at_1s_resolution(baseline_results, overlapping_results, annotations_data, sample_rate)
-
-    # Step 8: Boundary sensitivity
-    results_boundary = boundary_sensitivity_analysis(overlapping_results, annotations_data, sample_rate)
+    if annotations_data is None:
+        results_1s = pd.DataFrame()
+        results_boundary = pd.DataFrame()
+    else:
+        results_1s = compare_at_1s_resolution(
+            baseline_results,
+            overlapping_results,
+            annotations_data,
+            sample_rate,
+        )
+        results_boundary = boundary_sensitivity_analysis(
+            overlapping_results,
+            annotations_data,
+            sample_rate,
+        )
 
     # Combine all results
-    all_results = pd.concat([results_5s, results_1s], ignore_index=True)
+    all_results = pd.concat(
+        [result for result in (results_5s, results_1s) if not result.empty],
+        ignore_index=True,
+    )
     results_path = os.path.join(args.output_dir, "comparison_results.csv")
     all_results.to_csv(results_path, index=False)
     print(f"\nAll results saved to: {results_path}")
