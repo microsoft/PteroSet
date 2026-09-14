@@ -898,6 +898,24 @@ def publish_comparison_tables(
         print(f"Boundary sensitivity saved to: {boundary_path}")
 
 
+def verify_and_publish_comparison_tables(
+    results_5s: pd.DataFrame,
+    cv_reference: pd.DataFrame,
+    output_dir: str,
+    all_results: pd.DataFrame,
+    boundary_results: pd.DataFrame,
+    summary: pd.DataFrame,
+) -> None:
+    """Verify the historical baseline before publishing comparison tables."""
+    verify_baseline_metrics(results_5s, cv_reference)
+    publish_comparison_tables(
+        output_dir,
+        all_results,
+        boundary_results,
+        summary,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -906,6 +924,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=str, default="data/config.yaml")
     parser.add_argument("--fold_dir", type=str, default="data/folds_segmented_v3")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints_v3")
+    parser.add_argument(
+        "--cv_results",
+        type=str,
+        default="outputs_v3/cv_results.csv",
+        help="Historical v3 baseline metrics used as a required reference",
+    )
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -952,6 +976,85 @@ def load_annotation_metrics_input(
         return json.load(f)
 
 
+def load_cv_results_reference(
+    cv_results_path: str,
+    expected_folds: int,
+) -> pd.DataFrame:
+    """Load a complete historical CV metric reference."""
+    if not os.path.isfile(cv_results_path):
+        raise FileNotFoundError(
+            f"Historical CV results not found: {cv_results_path}"
+        )
+    reference = pd.read_csv(cv_results_path)
+    required_columns = {'fold', 'f1', 'auprc'}
+    missing_columns = required_columns - set(reference.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Historical CV results missing columns: {sorted(missing_columns)}"
+        )
+    if reference['fold'].isna().any():
+        raise ValueError("Historical CV results contain a missing fold identifier")
+    numeric_folds = pd.to_numeric(reference['fold'], errors='raise')
+    if not np.equal(numeric_folds, numeric_folds.astype(int)).all():
+        raise ValueError("Historical CV fold identifiers must be integers")
+    reference = reference.copy()
+    reference['fold'] = numeric_folds.astype(int)
+    if reference['fold'].duplicated().any():
+        duplicates = sorted(reference.loc[reference['fold'].duplicated(), 'fold'])
+        raise ValueError(
+            f"Historical CV results contain duplicate folds: {duplicates}"
+        )
+    expected = set(range(expected_folds))
+    actual = set(reference['fold'])
+    if actual != expected:
+        raise ValueError(
+            "Historical CV results have incomplete fold coverage; "
+            f"missing={sorted(expected - actual)}, "
+            f"unexpected={sorted(actual - expected)}"
+        )
+    return reference
+
+
+def verify_baseline_metrics(
+    results_5s: pd.DataFrame,
+    cv_reference: pd.DataFrame,
+    tolerance: float = 1e-4,
+) -> None:
+    """Require recomputed baseline metrics to match the historical reference."""
+    baseline = results_5s[results_5s['strategy'] == 'baseline']
+    expected_folds = set(cv_reference['fold'])
+    actual_folds = set(baseline['fold'])
+    if actual_folds != expected_folds or baseline['fold'].duplicated().any():
+        raise ValueError(
+            "Recomputed baseline has invalid fold coverage; "
+            f"missing={sorted(expected_folds - actual_folds)}, "
+            f"unexpected={sorted(actual_folds - expected_folds)}"
+        )
+
+    mismatches = []
+    reference_by_fold = cv_reference.set_index('fold')
+    for _, row in baseline.iterrows():
+        fold_idx = int(row['fold'])
+        reference_row = reference_by_fold.loc[fold_idx]
+        for metric in ('f1', 'auprc'):
+            actual = float(row[metric])
+            expected = float(reference_row[metric])
+            if not (
+                np.isfinite(actual)
+                and np.isfinite(expected)
+                and abs(actual - expected) < tolerance
+            ):
+                mismatches.append(
+                    f"fold {fold_idx} {metric}: "
+                    f"computed={actual:.6f}, reference={expected:.6f}"
+                )
+    if mismatches:
+        raise ValueError(
+            "Recomputed v3 baseline metrics do not match historical CV "
+            f"results: {'; '.join(mismatches)}"
+        )
+
+
 def main():
     args = build_arg_parser().parse_args()
     validate_historical_artifact_paths(
@@ -962,7 +1065,10 @@ def main():
 
     config = load_config(args.config)
     sample_rate = config.audio.sample_rate
-    os.makedirs(args.output_dir, exist_ok=True)
+    cv_reference = load_cv_results_reference(
+        args.cv_results,
+        len(PROJECTS),
+    )
 
     # Load segmented windows
     segmented_windows = load_segmented_windows_if_exists(
@@ -1026,7 +1132,9 @@ def main():
     )
     # Summary
     summary = compute_summary(all_results)
-    publish_comparison_tables(
+    verify_and_publish_comparison_tables(
+        results_5s,
+        cv_reference,
         args.output_dir,
         all_results,
         results_boundary,
@@ -1038,22 +1146,6 @@ def main():
     # PR curves
     pr_path = os.path.join(args.output_dir, "comparison_pr_curves.png")
     plot_pr_curves(baseline_results, overlapping_results, sample_rate, pr_path)
-
-    # Verification: baseline 5s metrics should match cv_results.csv
-    print("\n" + "=" * 60)
-    print("VERIFICATION: Baseline 5s metrics vs cv_results.csv")
-    print("=" * 60)
-    cv_results_path = os.path.join(args.output_dir, "cv_results.csv")
-    if os.path.exists(cv_results_path):
-        cv_df = pd.read_csv(cv_results_path)
-        for fold_idx in range(len(PROJECTS)):
-            bl_row = results_5s[(results_5s['fold'] == fold_idx) & (results_5s['strategy'] == 'baseline')].iloc[0]
-            cv_row = cv_df[cv_df['fold'] == fold_idx].iloc[0]
-            f1_match = abs(bl_row['f1'] - cv_row['f1']) < 1e-4
-            auprc_match = abs(bl_row['auprc'] - cv_row['auprc']) < 1e-4
-            status = "OK" if (f1_match and auprc_match) else "MISMATCH"
-            print(f"  Fold {fold_idx}: F1 {bl_row['f1']:.6f} vs {cv_row['f1']:.6f} | "
-                  f"AUPRC {bl_row['auprc']:.6f} vs {cv_row['auprc']:.6f} [{status}]")
 
 
 if __name__ == "__main__":

@@ -160,6 +160,7 @@ def test_annotations_are_disabled_by_default_without_opening_current_file(
     args = compare_inference_strategies.build_arg_parser().parse_args([])
     assert args.annotations is None
     assert args.annotations_version is None
+    assert args.cv_results == "outputs_v3/cv_results.csv"
 
     def fail_open(*_args, **_kwargs):
         raise AssertionError("annotations must not be opened implicitly")
@@ -249,6 +250,87 @@ def test_second_run_without_annotations_removes_stale_boundary_output(tmp_path):
     assert published.to_dict("records") == [
         {"resolution": "5s", "f1": 0.7}
     ]
+
+
+@pytest.mark.parametrize("path_kind", ["missing", "directory"])
+def test_cv_results_reference_requires_existing_file(tmp_path, path_kind):
+    cv_results = tmp_path / "cv_results.csv"
+    if path_kind == "directory":
+        cv_results.mkdir()
+
+    with pytest.raises(FileNotFoundError, match="Historical CV results not found"):
+        compare_inference_strategies.load_cv_results_reference(
+            str(cv_results),
+            len(compare_inference_strategies.PROJECTS),
+        )
+
+
+def test_cv_results_reference_requires_complete_fold_coverage(tmp_path):
+    cv_results = tmp_path / "cv_results.csv"
+    pd.DataFrame(
+        [
+            {"fold": fold, "f1": 0.5, "auprc": 0.6}
+            for fold in range(len(compare_inference_strategies.PROJECTS) - 1)
+        ]
+    ).to_csv(cv_results, index=False)
+
+    with pytest.raises(ValueError, match=r"incomplete fold coverage.*missing=\[4\]"):
+        compare_inference_strategies.load_cv_results_reference(
+            str(cv_results),
+            len(compare_inference_strategies.PROJECTS),
+        )
+
+
+def _baseline_metrics(f1: float = 0.5, auprc: float = 0.6) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "fold": fold,
+                "strategy": "baseline",
+                "resolution": "5s",
+                "f1": f1,
+                "auprc": auprc,
+            }
+            for fold in range(len(compare_inference_strategies.PROJECTS))
+        ]
+    )
+
+
+def test_metric_mismatch_leaves_comparison_outputs_unpublished(tmp_path):
+    output_dir = tmp_path / "comparison"
+    results_5s = _baseline_metrics(f1=0.5)
+    reference = _baseline_metrics(f1=0.9)[["fold", "f1", "auprc"]]
+
+    with pytest.raises(ValueError, match="do not match historical CV results"):
+        compare_inference_strategies.verify_and_publish_comparison_tables(
+            results_5s,
+            reference,
+            str(output_dir),
+            results_5s,
+            pd.DataFrame(),
+            pd.DataFrame([{"resolution": "5s"}]),
+        )
+
+    assert not output_dir.exists()
+
+
+def test_valid_cv_reference_allows_comparison_publication(tmp_path):
+    output_dir = tmp_path / "comparison"
+    results_5s = _baseline_metrics()
+    reference = results_5s[["fold", "f1", "auprc"]]
+    summary = pd.DataFrame([{"resolution": "5s", "f1_mean": 0.5}])
+
+    compare_inference_strategies.verify_and_publish_comparison_tables(
+        results_5s,
+        reference,
+        str(output_dir),
+        results_5s,
+        pd.DataFrame(),
+        summary,
+    )
+
+    assert (output_dir / "comparison_results.csv").is_file()
+    assert (output_dir / "comparison_summary.csv").is_file()
 
 
 def test_rejects_missing_project_identity(tmp_path, monkeypatch):
