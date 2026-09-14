@@ -25,6 +25,95 @@ sample-based ranges. This avoids duplicating project-specific boundary logic
 in downstream tools. Rows describe complete 10-second snapshots; a trailing
 interval shorter than 10 seconds is not a segment.
 
+## Segmented-window cache correction
+
+### Old flow and root cause
+
+The v4 dataset did not generate segmented windows from the segment manifest.
+It first loaded or generated the recording-level
+`windows_mapping_4.0overlap.json`, then retained only windows contained within
+the project-aware 10-second segments:
+
+```text
+annotations -> cached recording-level windows -> segment-boundary filter
+            -> segmented windows -> spectrograms -> folds -> checkpoints
+```
+
+That flow made the segmented dataset depend on the completeness of an
+upstream cache. The cached recording-level mapping ended before the currently
+annotated duration for a subset of recordings, so filtering it could not
+recover their valid tail windows. The segment geometry itself was correct:
+PPA1 used a 9-second stride and all other projects used a 10-second stride.
+The defect was cache invalidation and cache provenance, not the segment
+containment calculation.
+
+The shipped segmented v4 mapping therefore contains 160,244 windows. The v4
+folds, spectrogram selection, and checkpoints were built from that mapping and
+exclude 1,822 valid windows.
+
+### Corrected flow
+
+Segmented windows are now generated directly from the current annotations and
+the shared segment geometry:
+
+```text
+current annotations + segment geometry -> segmented windows
+                                       -> required spectrograms
+                                       -> folds -> checkpoints
+```
+
+Each complete 10-second segment contributes six 5-second windows at a
+1-second step. Generation no longer requires the recording-level windows
+cache to contain every candidate window. Spectrogram generation consumes the
+new segmented mapping so that every mapped window has its required
+spectrogram.
+
+### Verified expected counts
+
+The following counts are derived from the current annotation sound durations
+and the shared full-segment iterator:
+
+| Project | Complete segments | Expected windows | Old v4 windows | Added |
+|---------|------------------:|-----------------:|---------------:|------:|
+| MAP1 | 2,208 | 13,248 | 13,018 | 230 |
+| PPA1 | 5,184 | 31,104 | 31,104 | 0 |
+| PPA2 | 6,576 | 39,456 | 38,947 | 509 |
+| PPA3 | 7,248 | 43,488 | 42,895 | 593 |
+| PPA4 | 5,795 | 34,770 | 34,280 | 490 |
+| **Total** | **27,011** | **162,066** | **160,244** | **1,822** |
+
+The expected total is 162,066, not 162,144. Of the 121 PPA4 recordings, five
+have current annotated durations shorter than 480 seconds: two are 440
+seconds, two are 460 seconds, and one is 470 seconds. They provide 13 fewer
+complete segments, or 78 fewer windows, than the all-480-second assumption.
+
+### What is known and what is not
+
+Verified facts:
+
+- the old segmented v4 artifact contains 160,244 windows;
+- direct generation from current annotation durations produces 162,066;
+- the 1,822-window difference consists of valid tail windows absent from the
+  stale recording-level cache; and
+- the five short PPA4 durations account for the 78-window difference between
+  162,144 and 162,066.
+
+The historical origin of the older duration values used when the stale cache
+was created is unknown. The available artifacts establish that the cache ends
+early; they do not establish whether those duration values came from an older
+annotation export, audio metadata, or another preprocessing step. Do not
+record a specific historical source without additional provenance evidence.
+
+### Artifact migration
+
+The corrected mapping is a dataset revision, not an in-place reinterpretation
+of v4 results. Rebuild the segmented mapping, generate all spectrograms
+required by it, regenerate folds/splits, and retrain/evaluate checkpoints.
+Window IDs and downstream row assignments may change when the omitted windows
+are inserted, so existing folds must not be combined with the corrected
+mapping by ID. Retain old v4 checkpoints only as results for the 160,244-window
+dataset; they do not include the 1,822 recovered windows.
+
 ## Time semantics
 
 `start_sec_in_file`, `end_sec_in_file`, `start_sample`, and `end_sample` are
@@ -133,14 +222,16 @@ A generator or consumer should verify:
 
 For PPA1, a useful geometry check is that segment 0 covers `[0, 10)`, segment 1
 covers `[9, 19)`, and their one-second overlap is intentional. For another
-project, segment 0 covers `[0, 10)` and segment 1 covers `[10, 20)`.## Reviewer-response wording
+project, segment 0 covers `[0, 10)` and segment 1 covers `[10, 20)`.
+
+## Reviewer-response wording
 
 Suggested concise wording for reviews or change summaries:
 
-> We now use one project-aware snapshot rule for both window filtering and the
-> segment manifest. All snapshots are 10 seconds long; PPA1 starts snapshots
-> every 9 seconds because adjacent snapshots overlap by 1 second, whereas
-> MAP1/PPA2/PPA3/PPA4 start snapshots every 10 seconds. Manifest offsets refer
-> to positions within each concatenated WAV, not acquisition timestamps, and
-> `date_recorded` alone cannot recover the real time of an individual
-> time-lapse snapshot.
+> Segmented windows are now generated directly from current annotations and
+> project-aware segment geometry instead of filtering a recording-level
+> window cache. The old cache omitted 1,822 valid tail windows, leaving the v4
+> dataset and checkpoints at 160,244 windows. The corrected expected total is
+> 162,066: five short PPA4 recordings account for the 78-window reduction from
+> the otherwise expected 162,144. The segment math was not the fault; the
+> upstream cache was stale.
