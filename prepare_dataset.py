@@ -26,7 +26,7 @@ from PytorchWildlife.data.bioacoustics.bioacoustics_configs import (
 from PytorchWildlife.data.bioacoustics.bioacoustics_windows import build_windows
 from data.segment_utils import (
     PPA1_SEGMENT_STRIDE_SEC,
-    window_is_contained_in_segment,
+    iter_full_segments,
 )
 
 
@@ -147,21 +147,92 @@ def run_windows(config: DomainConfig) -> List[dict]:
     return windows
 
 
+def build_segmented_windows(
+    annotations_data: dict,
+    datasets: List[str],
+    sample_rate: int,
+    window_size_sec: float,
+    overlap_sec: float,
+    segment_duration_sec: float = 10,
+) -> List[dict]:
+    """Build segmented windows directly from sound and annotation geometry."""
+    window_size_samples = round(window_size_sec * sample_rate)
+    hop_samples = round((window_size_sec - overlap_sec) * sample_rate)
+    if window_size_samples <= 0:
+        raise ValueError("window_size_sec must produce at least one sample")
+    if hop_samples <= 0:
+        raise ValueError("overlap_sec must be smaller than window_size_sec")
+    if window_size_sec > segment_duration_sec:
+        raise ValueError("window_size_sec must not exceed segment_duration_sec")
+
+    sound_to_anns = defaultdict(list)
+    for annotation in annotations_data.get("annotations", []):
+        sound_to_anns[annotation["sound_id"]].append(
+            (annotation["t_min"], annotation["t_max"])
+        )
+
+    dataset_names = set(datasets)
+    segmented = []
+    seen_geometry = set()
+    for sound in annotations_data.get("sounds", []):
+        project = sound.get("project")
+        if project not in dataset_names:
+            project = next(
+                (
+                    name
+                    for name in datasets
+                    if name in sound.get("file_name_path", "")
+                ),
+                None,
+            )
+        if project is None or project not in dataset_names:
+            continue
+
+        sound_id = sound["id"]
+        for segment in iter_full_segments(
+            duration_sec=sound["duration"],
+            source_sample_rate=sample_rate,
+            project=project,
+            segment_duration_sec=segment_duration_sec,
+        ):
+            last_start = segment.end_sample - window_size_samples
+            for start in range(segment.start_sample, last_start + 1, hop_samples):
+                end = start + window_size_samples
+                geometry = (sound_id, start, end)
+                if geometry in seen_geometry:
+                    continue
+                seen_geometry.add(geometry)
+
+                start_sec = start / sample_rate
+                end_sec = end / sample_rate
+                label = int(
+                    any(
+                        annotation_start < end_sec and annotation_end > start_sec
+                        for annotation_start, annotation_end in sound_to_anns.get(
+                            sound_id, []
+                        )
+                    )
+                )
+                segmented.append(
+                    {
+                        "window_id": len(segmented),
+                        "dataset": project,
+                        "sample_rate": sample_rate,
+                        "sound_id": sound_id,
+                        "start": start,
+                        "end": end,
+                        "label": label,
+                    }
+                )
+
+    return segmented
+
+
 def run_segment_windows(
     config: DomainConfig,
-    windows: List[dict],
-    segment_duration_sec: int = 10,
+    segment_duration_sec: float = 10,
 ) -> List[dict]:
-    """Filter windows that cross segment boundaries and save segmented JSON.
-
-    Keeps only windows whose start and end fall within the same fixed-length
-    segment (default 10 s).  Uses per-project segment strides to handle
-    projects like PPA1 where consecutive segments overlap (1 s crossfade,
-    stride = 9 s).  Reassigns sequential window IDs.
-
-    Labels are re-derived from the current annotations JSON to ensure they
-    reflect the latest annotation state, regardless of upstream cache.
-    """
+    """Generate and save segmented windows from the current annotations."""
     print(f"\n{'=' * 60}")
     print("Step: Segment Windows (filter boundary-crossing windows)")
     print(f"{'=' * 60}")
@@ -172,89 +243,32 @@ def run_segment_windows(
         f"windows_mapping_{config.audio.overlap_sec}overlap_segmented.json",
     )
 
-    if os.path.exists(segmented_path):
-        print(f"Loading existing segmented windows from: {segmented_path}")
-        with open(segmented_path, "r") as f:
-            segmented = json.load(f)
-        print(f"Loaded {len(segmented)} segmented windows")
-    else:
-        sample_rate = config.audio.sample_rate
-        # Load annotations to determine per-sound segment stride.
-        # PPA1 recordings use a 1 s crossfade between consecutive 10 s
-        # segments, so the stride between segment starts is 9 s instead of 10 s.
-        with open(config.paths.annotations_path, "r") as f:
-            annotations_data = json.load(f)
+    sample_rate = config.audio.sample_rate
+    with open(config.paths.annotations_path, "r") as f:
+        annotations_data = json.load(f)
 
-        sound_info = {s["id"]: s for s in annotations_data["sounds"]}
+    print(
+        f"Generating with segment_duration={segment_duration_sec}s, "
+        f"sample_rate={sample_rate}"
+    )
+    print(
+        f"  PPA1 stride: {PPA1_SEGMENT_STRIDE_SEC:g}s, "
+        f"default stride: {segment_duration_sec}s"
+    )
+    segmented = build_segmented_windows(
+        annotations_data=annotations_data,
+        datasets=config.datasets,
+        sample_rate=sample_rate,
+        window_size_sec=config.audio.window_size_sec,
+        overlap_sec=config.audio.overlap_sec,
+        segment_duration_sec=segment_duration_sec,
+    )
+    print(f"Generated windows: {len(segmented)}")
 
-        # Re-derive labels from current annotations. Input window labels may be
-        # stale from an outdated unsegmented cache; the segmented file must
-        # reflect the annotations JSON at time-of-derivation.
-        sound_to_anns = defaultdict(list)
-        for a in annotations_data["annotations"]:
-            sound_to_anns[a["sound_id"]].append((a["t_min"], a["t_max"]))
-
-        print(
-            f"Filtering with segment_duration={segment_duration_sec}s, sample_rate={sample_rate}"
-        )
-        print(
-            f"  PPA1 stride: {PPA1_SEGMENT_STRIDE_SEC:g}s, "
-            f"default stride: {segment_duration_sec}s"
-        )
-        print(f"Input windows: {len(windows)}")
-
-        # Determine dataset name for each sound from annotations
-        sound_dataset = {}
-        for sid, sound in sound_info.items():
-            # Use the project field from annotations; fall back to
-            # matching config.datasets against the file path.
-            proj = sound.get("project")
-            if proj and proj in config.datasets:
-                sound_dataset[sid] = proj
-            else:
-                for dataset_name in config.datasets:
-                    if dataset_name in sound["file_name_path"]:
-                        sound_dataset[sid] = dataset_name
-                        break
-
-        segmented = []
-        for w in windows:
-            start = w["start"]
-            end = w["end"]
-            project = sound_info.get(w["sound_id"], {}).get("project")
-            fits = window_is_contained_in_segment(
-                start_sample=start,
-                end_sample=end,
-                project=project,
-                sample_rate=sample_rate,
-                segment_duration_sec=segment_duration_sec,
-            )
-
-            if fits:
-                w_copy = dict(w)
-                w_copy["dataset"] = sound_dataset.get(w["sound_id"])
-                sr = w_copy["sample_rate"]
-                ws_sec = w_copy["start"] / sr
-                we_sec = w_copy["end"] / sr
-                w_copy["label"] = int(
-                    any(
-                        a_min < we_sec and a_max > ws_sec
-                        for a_min, a_max in sound_to_anns.get(w_copy["sound_id"], [])
-                    )
-                )
-                segmented.append(w_copy)
-
-        # Reassign sequential window IDs
-        for i, w in enumerate(segmented):
-            w["window_id"] = i
-
-        removed = len(windows) - len(segmented)
-        print(f"Valid windows: {len(segmented)}")
-        print(f"Removed: {removed} ({100 * removed / len(windows):.1f}%)")
-
-        with open(segmented_path, "w") as f:
-            json.dump(segmented, f, indent=2)
-        print(f"Saved to: {segmented_path}")
+    os.makedirs(output_dir, exist_ok=True)
+    with open(segmented_path, "w") as f:
+        json.dump(segmented, f, indent=2)
+    print(f"Saved to: {segmented_path}")
 
     counts = count_window_labels(segmented)
     print(f"\nLabel distribution: {counts}")
@@ -510,19 +524,6 @@ def run_splits(
     print("Test: non-overlapping windows only")
 
 
-def load_windows_if_exists(config: DomainConfig) -> Optional[List[dict]]:
-    """Load windows from file if they exist."""
-    output_dir = config.paths.data_root
-    windows_output_path = os.path.join(
-        output_dir, f"windows_mapping_{config.audio.overlap_sec}overlap.json"
-    )
-
-    if os.path.exists(windows_output_path):
-        with open(windows_output_path, "r") as f:
-            return json.load(f)
-    return None
-
-
 def load_segmented_windows_if_exists(
     config: DomainConfig,
 ) -> Optional[List[dict]]:
@@ -540,6 +541,7 @@ def load_segmented_windows_if_exists(
 
 
 ALL_STEPS = ["stats", "windows", "segment_windows", "spectrograms", "splits"]
+DEFAULT_STEPS = ["stats", "segment_windows", "spectrograms", "splits"]
 
 
 def main():
@@ -572,9 +574,9 @@ Examples:
         "--steps",
         type=str,
         nargs="+",
-        default=ALL_STEPS,
+        default=DEFAULT_STEPS,
         choices=ALL_STEPS,
-        help="Steps to run (default: all)",
+        help="Steps to run (default: stats segment_windows spectrograms splits)",
     )
 
     args = parser.parse_args()
@@ -583,8 +585,6 @@ Examples:
     print(f"Loading config from: {args.config}")
     config = load_config(args.config)
 
-    # Track windows across steps
-    windows = None
     segmented_windows = None
 
     # --- stats ---
@@ -593,25 +593,17 @@ Examples:
 
     # --- windows ---
     if "windows" in args.steps:
-        windows = run_windows(config)
+        run_windows(config)
 
     # --- segment_windows ---
     if "segment_windows" in args.steps:
-        if windows is None:
-            windows = load_windows_if_exists(config)
-        if windows is None:
-            print("\nError: Windows not found. Run 'windows' step first.")
-            return
-        segmented_windows = run_segment_windows(config, windows)
+        segmented_windows = run_segment_windows(config)
 
-    # --- spectrograms (uses raw windows so all spectrograms are computed) ---
+    # --- spectrograms (uses exactly the annotation-derived segmented windows) ---
     if "spectrograms" in args.steps:
-        if windows is None:
-            windows = load_windows_if_exists(config)
-        if windows is None:
-            print("\nError: Windows not found. Run 'windows' step first.")
-            return
-        run_spectrograms(config, windows)
+        if segmented_windows is None:
+            segmented_windows = run_segment_windows(config)
+        run_spectrograms(config, segmented_windows)
 
     # --- splits (uses segmented windows) ---
     if "splits" in args.steps:
