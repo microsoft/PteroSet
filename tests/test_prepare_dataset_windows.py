@@ -419,6 +419,58 @@ def test_splits_use_window_dataset_without_metadata_csv(tmp_path):
             assert row["dataset"] == row["project"]
 
 
+def test_split_non_overlap_filter_uses_rounded_window_samples(tmp_path):
+    sounds = []
+    windows = []
+    spectrograms_dir = tmp_path / "spectrograms"
+    spectrograms_dir.mkdir()
+    for project_index, project in enumerate(("MAP1", "PPA1", "PPA2")):
+        for sound_index in range(2):
+            sound_id = project_index * 10 + sound_index
+            file_name = f"{project}-{sound_index}.wav"
+            sounds.append(
+                {
+                    "id": sound_id,
+                    "file_name_path": file_name,
+                    "duration": 10,
+                    "sample_rate": 10,
+                    "project": project,
+                }
+            )
+            windows.append(
+                {
+                    "window_id": len(windows),
+                    "dataset": project,
+                    "sample_rate": 10,
+                    "sound_id": sound_id,
+                    "start": 3,
+                    "end": 6,
+                    "label": 0,
+                }
+            )
+            (spectrograms_dir / f"{project}-{sound_index}_3_6.npy").touch()
+
+    config = _config(
+        tmp_path,
+        {"sounds": sounds, "annotations": []},
+        sample_rate=10,
+        window_size_sec=0.26,
+        overlap_sec=0.0,
+    )
+    prepare_dataset.run_splits(config, windows, version="v5")
+
+    test_csv = (
+        tmp_path
+        / "folds_segmented_v5"
+        / "fold_0_MAP1_segmented"
+        / "test_split.csv"
+    )
+    with test_csv.open() as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    assert len(rows) == 2
+    assert {int(row["start"]) for row in rows} == {3}
+
+
 def test_current_annotations_produce_expected_project_totals():
     annotations_path = os.environ.get("PTEROSET_ANNOTATIONS")
     if not annotations_path:

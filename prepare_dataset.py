@@ -452,7 +452,9 @@ def run_splits(
                 shutil.rmtree(entry.path)
     os.makedirs(folds_base, exist_ok=True)
 
-    window_size_samples = int(config.audio.window_size_sec * config.audio.sample_rate)
+    window_size_samples = round(
+        config.audio.window_size_sec * config.audio.sample_rate
+    )
 
     fieldnames = [
         "window_id",
