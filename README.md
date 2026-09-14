@@ -133,11 +133,13 @@ python train.py --config data/config.yaml \
 
 # Cross-validation across all 5 folds
 python train.py --config data/config.yaml \
-    --cross_validation --fold_dir data/folds_segmented_v5
+    --cross_validation --fold_dir data/folds_segmented_v5 \
+    --ckpt_dir checkpoints_v5
 
 # Train a specific fold
 python train.py --config data/config.yaml \
-    --cross_validation --fold_dir data/folds_segmented_v5 --fold 0
+    --cross_validation --fold_dir data/folds_segmented_v5 --fold 0 \
+    --ckpt_dir checkpoints_v5
 
 # Finetune from a pretrained checkpoint
 python train.py --config data/config.yaml \
@@ -156,7 +158,8 @@ python train.py --config data/config.yaml \
 python plot_cv_results.py \
     --fold_dir data/folds_segmented_v5 \
     --config data/config.yaml \
-    --checkpoint_dir checkpoints_v5
+    --checkpoint_dir checkpoints_v5 \
+    --output_dir outputs_v5
 ```
 
 ## Project Structure
