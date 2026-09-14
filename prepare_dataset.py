@@ -14,6 +14,8 @@ Usage:
 import os
 import argparse
 import json
+import re
+import shutil
 from collections import defaultdict
 from typing import List, Optional
 
@@ -153,9 +155,14 @@ def build_segmented_windows(
     sample_rate: int,
     window_size_sec: float,
     overlap_sec: float,
+    window_strategy: str = "sliding",
     segment_duration_sec: float = 10,
 ) -> List[dict]:
     """Build segmented windows directly from sound and annotation geometry."""
+    if window_strategy != "sliding":
+        raise ValueError(
+            "annotation-driven segmented windows require window_strategy='sliding'"
+        )
     window_size_samples = round(window_size_sec * sample_rate)
     hop_samples = round((window_size_sec - overlap_sec) * sample_rate)
     if window_size_samples <= 0:
@@ -228,20 +235,43 @@ def build_segmented_windows(
     return segmented
 
 
+DEFAULT_DATASET_VERSION = "v5"
+
+
+def validate_dataset_version(version: str) -> str:
+    """Validate a new annotation-derived dataset revision suffix."""
+    match = re.fullmatch(r"v([1-9][0-9]*)", version)
+    if match is None:
+        raise ValueError("dataset version must use the form vN")
+    if int(match.group(1)) < 5:
+        raise ValueError("dataset versions v1-v4 are historical and read-only")
+    return version
+
+
+def segmented_mapping_path(config: DomainConfig, version: str) -> str:
+    """Return the revision-specific segmented-window mapping path."""
+    version = validate_dataset_version(version)
+    return os.path.join(
+        config.paths.data_root,
+        (
+            f"windows_mapping_{config.audio.overlap_sec}overlap"
+            f"_segmented_{version}.json"
+        ),
+    )
+
+
 def run_segment_windows(
     config: DomainConfig,
+    version: str = DEFAULT_DATASET_VERSION,
     segment_duration_sec: float = 10,
 ) -> List[dict]:
     """Generate and save segmented windows from the current annotations."""
     print(f"\n{'=' * 60}")
-    print("Step: Segment Windows (filter boundary-crossing windows)")
+    print(f"Step: Generate Segmented Windows ({version})")
     print(f"{'=' * 60}")
 
     output_dir = config.paths.data_root
-    segmented_path = os.path.join(
-        output_dir,
-        f"windows_mapping_{config.audio.overlap_sec}overlap_segmented.json",
-    )
+    segmented_path = segmented_mapping_path(config, version)
 
     sample_rate = config.audio.sample_rate
     with open(config.paths.annotations_path, "r") as f:
@@ -261,6 +291,7 @@ def run_segment_windows(
         sample_rate=sample_rate,
         window_size_sec=config.audio.window_size_sec,
         overlap_sec=config.audio.overlap_sec,
+        window_strategy=config.audio.window_strategy,
         segment_duration_sec=segment_duration_sec,
     )
     print(f"Generated windows: {len(segmented)}")
@@ -336,7 +367,10 @@ def run_spectrograms(config: DomainConfig, windows: List[dict]) -> None:
 
 
 def run_splits(
-    config: DomainConfig, windows: List[dict], folds_subdir: str = "folds_segmented"
+    config: DomainConfig,
+    windows: List[dict],
+    folds_subdir: Optional[str] = None,
+    version: str = DEFAULT_DATASET_VERSION,
 ) -> None:
     """Create leave-one-project-out cross-validation splits.
 
@@ -352,8 +386,15 @@ def run_splits(
 
     spectrograms_dir = config.paths.spectrograms_dir
     output_dir = config.paths.data_root
+    version = validate_dataset_version(version)
+    expected_folds_subdir = f"folds_segmented_{version}"
+    if folds_subdir is None:
+        folds_subdir = expected_folds_subdir
+    elif folds_subdir != expected_folds_subdir:
+        raise ValueError(
+            f"folds_subdir must be {expected_folds_subdir!r} for version {version}"
+        )
     folds_base = os.path.join(output_dir, folds_subdir)
-    os.makedirs(folds_base, exist_ok=True)
 
     print(f"Spectrograms directory: {spectrograms_dir}")
     print(f"Output directory: {folds_base}")
@@ -377,26 +418,16 @@ def run_splits(
             data.append(
                 {
                     "window_id": w["window_id"],
+                    "dataset": w.get("dataset") or sound.get("project"),
                     "sound_id": w["sound_id"],
                     "start": w["start"],
                     "end": w["end"],
                     "label": w.get("label", 0),
                     "spec_name": spec_name,
                     "sound_filename": os.path.basename(sound["file_name_path"]),
+                    "project": w.get("dataset") or sound.get("project"),
                 }
             )
-
-    # Add project column via metadata
-    metadata_path = os.path.join(config.paths.data_root, "metadata.csv")
-    print(f"Loading metadata from: {metadata_path}")
-    audio_to_project = {}
-    with open(metadata_path, "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            audio_to_project[row["audio_file"]] = row["project_name"]
-
-    for d in data:
-        d["project"] = audio_to_project.get(d["sound_filename"])
 
     data = [d for d in data if d["project"] is not None]
     print(f"Windows with project mapping: {len(data)}")
@@ -411,6 +442,15 @@ def run_splits(
 
     projects = sorted(set(d["project"] for d in data))
     print(f"\nProjects ({len(projects)}): {projects}")
+
+    if os.path.isdir(folds_base):
+        for entry in os.scandir(folds_base):
+            is_generated_fold = entry.is_dir(
+                follow_symlinks=False
+            ) and entry.name.startswith("fold_")
+            if is_generated_fold:
+                shutil.rmtree(entry.path)
+    os.makedirs(folds_base, exist_ok=True)
 
     window_size_samples = int(config.audio.window_size_sec * config.audio.sample_rate)
 
@@ -434,7 +474,6 @@ def run_splits(
             for d in rows:
                 row = {k: d.get(k, "") for k in fieldnames}
                 row["sample_rate"] = config.audio.sample_rate
-                row["dataset"] = ""
                 writer.writerow(row)
 
     fold_stats = []
@@ -526,13 +565,10 @@ def run_splits(
 
 def load_segmented_windows_if_exists(
     config: DomainConfig,
+    version: str = DEFAULT_DATASET_VERSION,
 ) -> Optional[List[dict]]:
     """Load segmented windows from file if they exist."""
-    output_dir = config.paths.data_root
-    segmented_path = os.path.join(
-        output_dir,
-        f"windows_mapping_{config.audio.overlap_sec}overlap_segmented.json",
-    )
+    segmented_path = segmented_mapping_path(config, version)
 
     if os.path.exists(segmented_path):
         with open(segmented_path, "r") as f:
@@ -556,10 +592,10 @@ Examples:
     # Only compute statistics and build windows
     python prepare_dataset.py --config data/config.yaml --steps stats windows
 
-    # Only compute spectrograms (windows must already exist)
+    # Only compute spectrograms (segmented windows are regenerated first)
     python prepare_dataset.py --config data/config.yaml --steps spectrograms
 
-    # Only create splits (segmented windows and spectrograms must already exist)
+    # Only create splits (segmented windows are regenerated first)
     python prepare_dataset.py --config data/config.yaml --steps splits
         """,
     )
@@ -577,6 +613,15 @@ Examples:
         default=DEFAULT_STEPS,
         choices=ALL_STEPS,
         help="Steps to run (default: stats segment_windows spectrograms splits)",
+    )
+    parser.add_argument(
+        "--version",
+        type=validate_dataset_version,
+        default=DEFAULT_DATASET_VERSION,
+        help=(
+            "Dataset revision suffix for segmented mapping and folds "
+            f"(default: {DEFAULT_DATASET_VERSION})"
+        ),
     )
 
     args = parser.parse_args()
@@ -597,26 +642,22 @@ Examples:
 
     # --- segment_windows ---
     if "segment_windows" in args.steps:
-        segmented_windows = run_segment_windows(config)
+        segmented_windows = run_segment_windows(config, version=args.version)
 
     # --- spectrograms (uses exactly the annotation-derived segmented windows) ---
     if "spectrograms" in args.steps:
         if segmented_windows is None:
-            segmented_windows = run_segment_windows(config)
+            segmented_windows = run_segment_windows(config, version=args.version)
         run_spectrograms(config, segmented_windows)
 
     # --- splits (uses segmented windows) ---
     if "splits" in args.steps:
         if segmented_windows is None:
-            segmented_windows = load_segmented_windows_if_exists(config)
-        if segmented_windows is None:
-            print(
-                "\nError: Segmented windows not found. Run 'segment_windows' step first."
-            )
-            return
+            segmented_windows = run_segment_windows(config, version=args.version)
         run_splits(
             config,
             segmented_windows,
+            version=args.version,
         )
 
     print(f"\n{'=' * 60}")
