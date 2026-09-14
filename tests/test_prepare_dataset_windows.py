@@ -17,6 +17,9 @@ from prepare_dataset import build_segmented_windows, run_segment_windows
 def _config(tmp_path: Path, annotations: dict, **audio_overrides):
     annotations_path = tmp_path / "annotations.json"
     annotations_path.write_text(json.dumps(annotations))
+    datasets = audio_overrides.pop(
+        "datasets", ["MAP1", "PPA1", "PPA2", "PPA3", "PPA4"]
+    )
     audio = {
         "sample_rate": 100,
         "window_size_sec": 5.0,
@@ -25,7 +28,7 @@ def _config(tmp_path: Path, annotations: dict, **audio_overrides):
     }
     audio.update(audio_overrides)
     return SimpleNamespace(
-        datasets=["MAP1", "PPA1", "PPA2", "PPA3", "PPA4"],
+        datasets=datasets,
         audio=SimpleNamespace(**audio),
         paths=SimpleNamespace(
             annotations_path=str(annotations_path),
@@ -357,6 +360,21 @@ def test_versioned_mapping_and_fold_paths_do_not_overwrite_v4(tmp_path):
     assert (tmp_path / "windows_mapping_4.0overlap_segmented_v5.json").exists()
 
 
+def test_v5_mapping_symlink_does_not_overwrite_historical_mapping(tmp_path):
+    config = _config(tmp_path, {"sounds": [], "annotations": []})
+    historical_v4 = tmp_path / "windows_mapping_4.0overlap_segmented_v4.json"
+    historical_v4.write_text("historical-v4")
+    v5_mapping = tmp_path / "windows_mapping_4.0overlap_segmented_v5.json"
+    v5_mapping.symlink_to(historical_v4)
+
+    prepare_dataset.run_segment_windows(config, version="v5")
+
+    assert historical_v4.read_text() == "historical-v4"
+    assert not v5_mapping.is_symlink()
+    assert json.loads(v5_mapping.read_text()) == []
+    assert not list(tmp_path.glob("*.json.staging-*"))
+
+
 def test_rejects_historical_fold_destination_without_deleting_it(tmp_path):
     config = _config(tmp_path, {"sounds": [], "annotations": []})
     historical_fold = tmp_path / "folds_segmented_v4" / "fold_0_MAP1_segmented"
@@ -381,6 +399,21 @@ def test_rejects_historical_or_invalid_output_versions(tmp_path, version):
 
     with pytest.raises(ValueError, match="historical|form vN"):
         prepare_dataset.run_segment_windows(config, version=version)
+
+
+def test_reads_historical_segmented_mapping_but_refuses_to_write_it(tmp_path):
+    config = _config(tmp_path, {"sounds": [], "annotations": []})
+    historical = tmp_path / "windows_mapping_4.0overlap_segmented_v3.json"
+    historical_windows = [{"window_id": 3, "label": 1}]
+    historical.write_text(json.dumps(historical_windows))
+
+    assert (
+        prepare_dataset.load_segmented_windows_if_exists(config, version="v3")
+        == historical_windows
+    )
+    with pytest.raises(ValueError, match="historical and read-only"):
+        prepare_dataset.run_segment_windows(config, version="v3")
+    assert json.loads(historical.read_text()) == historical_windows
 
 
 def test_rejects_non_sliding_window_strategy(tmp_path):
@@ -466,7 +499,11 @@ def test_splits_use_window_dataset_without_metadata_csv(tmp_path):
             window_id += 1
             (spectrograms_dir / f"{project}-{sound_index}_0_500.npy").touch()
 
-    config = _config(tmp_path, {"sounds": sounds, "annotations": []})
+    config = _config(
+        tmp_path,
+        {"sounds": sounds, "annotations": []},
+        datasets=["MAP1", "PPA1", "PPA2"],
+    )
     stale_fold = tmp_path / "folds_segmented_v5" / "fold_9_STALE_segmented"
     stale_fold.mkdir(parents=True)
     (stale_fold / "train_split.csv").write_text("stale")
@@ -476,6 +513,8 @@ def test_splits_use_window_dataset_without_metadata_csv(tmp_path):
     assert folds_root.is_dir()
     assert not stale_fold.exists()
     assert not (tmp_path / "metadata.csv").exists()
+    assert not list(tmp_path.glob(".folds_segmented_v5.staging-*"))
+    assert not list(tmp_path.glob(".folds_segmented_v5.backup-*"))
     csv_paths = list(folds_root.glob("*/*_split.csv"))
     assert csv_paths
     for csv_path in csv_paths:
@@ -529,6 +568,194 @@ def test_rejects_generated_fold_symlink_without_touching_v4(tmp_path):
     assert legitimate_sentinel.read_text() == "existing-v5"
 
 
+def test_rejects_any_symlink_child_in_existing_folds_root(tmp_path):
+    config = _config(tmp_path, {"sounds": [], "annotations": []})
+    historical_root = tmp_path / "folds_segmented_v4"
+    historical_root.mkdir()
+    sentinel = historical_root / "sentinel.txt"
+    sentinel.write_text("historical-v4")
+    v5_root = tmp_path / "folds_segmented_v5"
+    v5_root.mkdir()
+    (v5_root / "notes").symlink_to(historical_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="directory child must not be a symlink"):
+        prepare_dataset.run_splits(config, [], version="v5")
+
+    assert sentinel.read_text() == "historical-v4"
+
+
+def test_missing_spectrogram_preserves_existing_folds(tmp_path):
+    annotations = {
+        "sounds": [
+            {
+                "id": 1,
+                "file_name_path": "MAP1.wav",
+                "duration": 10,
+                "sample_rate": 100,
+                "project": "MAP1",
+            }
+        ],
+        "annotations": [],
+    }
+    config = _config(tmp_path, annotations, datasets=["MAP1"])
+    current_fold = tmp_path / "folds_segmented_v5" / "fold_0_MAP1_segmented"
+    current_fold.mkdir(parents=True)
+    sentinel = current_fold / "sentinel.txt"
+    sentinel.write_text("current-folds")
+    windows = [
+        {
+            "window_id": 0,
+            "dataset": "MAP1",
+            "sample_rate": 100,
+            "sound_id": 1,
+            "start": 0,
+            "end": 500,
+            "label": 0,
+        }
+    ]
+
+    with pytest.raises(FileNotFoundError, match="missing spectrograms"):
+        prepare_dataset.run_splits(config, windows, version="v5")
+
+    assert sentinel.read_text() == "current-folds"
+    assert not list(tmp_path.glob(".folds_segmented_v5.staging-*"))
+    assert not list(tmp_path.glob(".folds_segmented_v5.backup-*"))
+
+
+def test_project_validation_preserves_existing_folds(tmp_path):
+    annotations = {
+        "sounds": [
+            {
+                "id": 1,
+                "file_name_path": "MAP1.wav",
+                "duration": 10,
+                "sample_rate": 100,
+                "project": "MAP1",
+            }
+        ],
+        "annotations": [],
+    }
+    config = _config(tmp_path, annotations, datasets=["MAP1", "PPA1"])
+    spectrograms_dir = tmp_path / "spectrograms"
+    spectrograms_dir.mkdir()
+    (spectrograms_dir / "MAP1_0_500.npy").touch()
+    current_fold = tmp_path / "folds_segmented_v5" / "fold_0_MAP1_segmented"
+    current_fold.mkdir(parents=True)
+    sentinel = current_fold / "sentinel.txt"
+    sentinel.write_text("current-folds")
+    windows = [
+        {
+            "window_id": 0,
+            "dataset": "MAP1",
+            "sample_rate": 100,
+            "sound_id": 1,
+            "start": 0,
+            "end": 500,
+            "label": 0,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="project set"):
+        prepare_dataset.run_splits(config, windows, version="v5")
+
+    assert sentinel.read_text() == "current-folds"
+    assert not list(tmp_path.glob(".folds_segmented_v5.staging-*"))
+
+
+def test_rejects_project_names_that_could_escape_staging(tmp_path):
+    unsafe_project = "MAP1/../../../outside"
+    annotations = {
+        "sounds": [
+            {
+                "id": 1,
+                "file_name_path": "MAP1.wav",
+                "duration": 10,
+                "sample_rate": 100,
+                "project": unsafe_project,
+            }
+        ],
+        "annotations": [],
+    }
+    config = _config(tmp_path, annotations, datasets=[unsafe_project])
+    spectrograms_dir = tmp_path / "spectrograms"
+    spectrograms_dir.mkdir()
+    (spectrograms_dir / "MAP1_0_500.npy").touch()
+    windows = [
+        {
+            "window_id": 0,
+            "dataset": unsafe_project,
+            "sample_rate": 100,
+            "sound_id": 1,
+            "start": 0,
+            "end": 500,
+            "label": 0,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="safe path components"):
+        prepare_dataset.run_splits(config, windows, version="v5")
+
+    assert not list(tmp_path.glob(".folds_segmented_v5.staging-*"))
+
+
+def test_split_generation_failure_preserves_existing_folds(tmp_path, monkeypatch):
+    sounds = []
+    windows = []
+    spectrograms_dir = tmp_path / "spectrograms"
+    spectrograms_dir.mkdir()
+    for sound_id, project in enumerate(("MAP1", "PPA1"), start=1):
+        file_name = f"{project}.wav"
+        sounds.append(
+            {
+                "id": sound_id,
+                "file_name_path": file_name,
+                "duration": 10,
+                "sample_rate": 100,
+                "project": project,
+            }
+        )
+        windows.append(
+            {
+                "window_id": sound_id,
+                "dataset": project,
+                "sample_rate": 100,
+                "sound_id": sound_id,
+                "start": 0,
+                "end": 500,
+                "label": 0,
+            }
+        )
+        (spectrograms_dir / f"{project}_0_500.npy").touch()
+
+    config = _config(
+        tmp_path,
+        {"sounds": sounds, "annotations": []},
+        datasets=["MAP1", "PPA1"],
+    )
+    current_fold = tmp_path / "folds_segmented_v5" / "fold_0_MAP1_segmented"
+    current_fold.mkdir(parents=True)
+    sentinel = current_fold / "sentinel.txt"
+    sentinel.write_text("current-folds")
+
+    class FailingGroupSplit:
+        def __init__(self, **_kwargs):
+            pass
+
+        def split(self, *_args, **_kwargs):
+            raise RuntimeError("injected split failure")
+
+    monkeypatch.setattr(
+        "sklearn.model_selection.GroupShuffleSplit", FailingGroupSplit
+    )
+
+    with pytest.raises(RuntimeError, match="injected split failure"):
+        prepare_dataset.run_splits(config, windows, version="v5")
+
+    assert sentinel.read_text() == "current-folds"
+    assert not list(tmp_path.glob(".folds_segmented_v5.staging-*"))
+    assert not list(tmp_path.glob(".folds_segmented_v5.backup-*"))
+
+
 def test_split_non_overlap_filter_uses_rounded_window_samples(tmp_path):
     sounds = []
     windows = []
@@ -563,6 +790,7 @@ def test_split_non_overlap_filter_uses_rounded_window_samples(tmp_path):
     config = _config(
         tmp_path,
         {"sounds": sounds, "annotations": []},
+        datasets=["MAP1", "PPA1", "PPA2"],
         sample_rate=10,
         window_size_sec=0.26,
         overlap_sec=0.0,

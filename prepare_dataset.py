@@ -18,6 +18,7 @@ import re
 import shutil
 from collections import defaultdict
 from typing import List, Optional
+from uuid import uuid4
 
 
 # Import from PytorchWildlife core library
@@ -239,18 +240,33 @@ DEFAULT_DATASET_VERSION = "v5"
 
 
 def validate_dataset_version(version: str) -> str:
-    """Validate a new annotation-derived dataset revision suffix."""
+    """Validate a safe dataset revision suffix for reading."""
     match = re.fullmatch(r"v([1-9][0-9]*)", version)
     if match is None:
         raise ValueError("dataset version must use the form vN")
-    if int(match.group(1)) < 5:
+    return version
+
+
+def validate_writable_dataset_version(version: str) -> str:
+    """Validate a revision that may receive annotation-derived outputs."""
+    version = validate_dataset_version(version)
+    revision = int(version[1:])
+    if revision < 5:
         raise ValueError("dataset versions v1-v4 are historical and read-only")
     return version
 
 
-def segmented_mapping_path(config: DomainConfig, version: str) -> str:
+def segmented_mapping_path(
+    config: DomainConfig,
+    version: str,
+    *,
+    writable: bool = True,
+) -> str:
     """Return the revision-specific segmented-window mapping path."""
-    version = validate_dataset_version(version)
+    validator = (
+        validate_writable_dataset_version if writable else validate_dataset_version
+    )
+    version = validator(version)
     return os.path.join(
         config.paths.data_root,
         (
@@ -258,6 +274,22 @@ def segmented_mapping_path(config: DomainConfig, version: str) -> str:
             f"_segmented_{version}.json"
         ),
     )
+
+
+def _write_json_atomically(data: object, destination: str) -> None:
+    """Write JSON through an invocation-owned sibling file."""
+    staging_path = f"{destination}.staging-{uuid4().hex}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(staging_path, flags, 0o644)
+    try:
+        with os.fdopen(descriptor, "w") as staging_file:
+            json.dump(data, staging_file, indent=2)
+        os.replace(staging_path, destination)
+    finally:
+        if os.path.isfile(staging_path) and not os.path.islink(staging_path):
+            os.remove(staging_path)
 
 
 def run_segment_windows(
@@ -297,8 +329,7 @@ def run_segment_windows(
     print(f"Generated windows: {len(segmented)}")
 
     os.makedirs(output_dir, exist_ok=True)
-    with open(segmented_path, "w") as f:
-        json.dump(segmented, f, indent=2)
+    _write_json_atomically(segmented, segmented_path)
     print(f"Saved to: {segmented_path}")
 
     counts = count_window_labels(segmented)
@@ -366,6 +397,49 @@ def run_spectrograms(config: DomainConfig, windows: List[dict]) -> None:
     print("Spectrogram computation complete!")
 
 
+def _validate_folds_destination(folds_base: str) -> None:
+    """Reject fold destinations that could redirect writes outside the revision."""
+    if os.path.islink(folds_base):
+        raise ValueError(f"folds directory must not be a symlink: {folds_base}")
+    if os.path.lexists(folds_base) and not os.path.isdir(folds_base):
+        raise ValueError(f"folds destination must be a directory: {folds_base}")
+    if os.path.isdir(folds_base):
+        for entry in os.scandir(folds_base):
+            if entry.is_symlink():
+                label = (
+                    "generated fold path"
+                    if entry.name.startswith("fold_")
+                    else "folds directory child"
+                )
+                raise ValueError(
+                    f"{label} must not be a symlink: {entry.path}"
+                )
+
+
+def _replace_staged_folds(
+    staging_base: str,
+    folds_base: str,
+    backup_base: str,
+) -> None:
+    """Replace a validated folds directory with a fully generated staging tree."""
+    _validate_folds_destination(folds_base)
+    moved_existing = False
+    if os.path.isdir(folds_base):
+        os.rename(folds_base, backup_base)
+        moved_existing = True
+    try:
+        os.rename(staging_base, folds_base)
+    except Exception:
+        if moved_existing:
+            os.rename(backup_base, folds_base)
+        raise
+    if moved_existing:
+        try:
+            shutil.rmtree(backup_base)
+        except OSError as error:
+            print(f"Warning: could not remove replaced folds backup: {error}")
+
+
 def run_splits(
     config: DomainConfig,
     windows: List[dict],
@@ -386,7 +460,7 @@ def run_splits(
 
     spectrograms_dir = config.paths.spectrograms_dir
     output_dir = config.paths.data_root
-    version = validate_dataset_version(version)
+    version = validate_writable_dataset_version(version)
     expected_folds_subdir = f"folds_segmented_{version}"
     if folds_subdir is None:
         folds_subdir = expected_folds_subdir
@@ -395,6 +469,7 @@ def run_splits(
             f"folds_subdir must be {expected_folds_subdir!r} for version {version}"
         )
     folds_base = os.path.join(output_dir, folds_subdir)
+    _validate_folds_destination(folds_base)
 
     print(f"Spectrograms directory: {spectrograms_dir}")
     print(f"Output directory: {folds_base}")
@@ -409,55 +484,78 @@ def run_splits(
 
     # Build enriched data list from windows
     data = []
+    unknown_sound_ids = []
+    missing_projects = []
     for w in windows:
         sound = sounds.get(w["sound_id"])
-        if sound:
-            spec_name = spectrogram_filename(
-                sound["file_name_path"], w["start"], w["end"]
-            )
-            data.append(
-                {
-                    "window_id": w["window_id"],
-                    "dataset": w.get("dataset") or sound.get("project"),
-                    "sound_id": w["sound_id"],
-                    "start": w["start"],
-                    "end": w["end"],
-                    "label": w.get("label", 0),
-                    "spec_name": spec_name,
-                    "sound_filename": os.path.basename(sound["file_name_path"]),
-                    "project": w.get("dataset") or sound.get("project"),
-                }
-            )
+        if sound is None:
+            unknown_sound_ids.append(w["sound_id"])
+            continue
+        project = w.get("dataset") or sound.get("project")
+        if project is None:
+            missing_projects.append(w["sound_id"])
+            continue
+        spec_name = spectrogram_filename(
+            sound["file_name_path"], w["start"], w["end"]
+        )
+        data.append(
+            {
+                "window_id": w["window_id"],
+                "dataset": project,
+                "sound_id": w["sound_id"],
+                "start": w["start"],
+                "end": w["end"],
+                "label": w.get("label", 0),
+                "spec_name": spec_name,
+                "sound_filename": os.path.basename(sound["file_name_path"]),
+                "project": project,
+            }
+        )
 
-    data = [d for d in data if d["project"] is not None]
-    print(f"Windows with project mapping: {len(data)}")
-
-    # Filter to windows whose spectrogram exists on disk
-    data = [
-        d
-        for d in data
-        if os.path.exists(os.path.join(spectrograms_dir, d["spec_name"]))
-    ]
-    print(f"Windows with existing spectrograms: {len(data)}")
+    if unknown_sound_ids:
+        raise ValueError(
+            "split windows reference unknown sound IDs: "
+            f"{sorted(set(unknown_sound_ids), key=str)[:5]}"
+        )
+    if missing_projects:
+        raise ValueError(
+            "split windows have no dataset or annotation project: "
+            f"{sorted(set(missing_projects), key=str)[:5]}"
+        )
 
     projects = sorted(set(d["project"] for d in data))
+    expected_projects = set(config.datasets)
+    actual_projects = set(projects)
+    unsafe_projects = [
+        project
+        for project in expected_projects
+        if project in {".", ".."} or re.fullmatch(r"[A-Za-z0-9_.-]+", project) is None
+    ]
+    if unsafe_projects:
+        raise ValueError(
+            "project identifiers must be safe path components: "
+            f"{sorted(unsafe_projects)}"
+        )
+    if actual_projects != expected_projects:
+        raise ValueError(
+            "split project set does not match configured datasets; "
+            f"missing={sorted(expected_projects - actual_projects)}, "
+            f"unexpected={sorted(actual_projects - expected_projects)}"
+        )
+    print(f"Windows with project mapping: {len(data)}")
     print(f"\nProjects ({len(projects)}): {projects}")
 
-    if os.path.islink(folds_base):
-        raise ValueError(f"folds directory must not be a symlink: {folds_base}")
-    if os.path.isdir(folds_base):
-        generated_entries = [
-            entry for entry in os.scandir(folds_base) if entry.name.startswith("fold_")
-        ]
-        for entry in generated_entries:
-            if entry.is_symlink():
-                raise ValueError(
-                    f"generated fold path must not be a symlink: {entry.path}"
-                )
-        for entry in generated_entries:
-            if entry.is_dir(follow_symlinks=False):
-                shutil.rmtree(entry.path)
-    os.makedirs(folds_base, exist_ok=True)
+    missing_spectrograms = [
+        os.path.join(spectrograms_dir, d["spec_name"])
+        for d in data
+        if not os.path.isfile(os.path.join(spectrograms_dir, d["spec_name"]))
+    ]
+    if missing_spectrograms:
+        raise FileNotFoundError(
+            f"{len(missing_spectrograms)} split windows are missing spectrograms; "
+            f"first missing: {missing_spectrograms[0]}"
+        )
+    print(f"Windows with existing spectrograms: {len(data)}")
 
     window_size_samples = round(
         config.audio.window_size_sec * config.audio.sample_rate
@@ -485,81 +583,95 @@ def run_splits(
                 row["sample_rate"] = config.audio.sample_rate
                 writer.writerow(row)
 
+    invocation_id = uuid4().hex
+    staging_base = os.path.join(
+        output_dir, f".{folds_subdir}.staging-{invocation_id}"
+    )
+    backup_base = os.path.join(
+        output_dir, f".{folds_subdir}.backup-{invocation_id}"
+    )
+    os.makedirs(staging_base)
     fold_stats = []
 
-    for fold_idx, held_out_project in enumerate(projects):
-        fold_name = f"fold_{fold_idx}_{held_out_project}_segmented"
-        fold_dir = os.path.join(folds_base, fold_name)
-        os.makedirs(fold_dir, exist_ok=True)
+    try:
+        for fold_idx, held_out_project in enumerate(projects):
+            fold_name = f"fold_{fold_idx}_{held_out_project}_segmented"
+            fold_dir = os.path.join(staging_base, fold_name)
+            os.makedirs(fold_dir)
 
-        print(f"\n{'-' * 50}")
-        print(f"Fold {fold_idx}: held-out project = {held_out_project}")
-        print(f"{'-' * 50}")
+            print(f"\n{'-' * 50}")
+            print(f"Fold {fold_idx}: held-out project = {held_out_project}")
+            print(f"{'-' * 50}")
 
-        # Test: non-overlapping windows from held-out project
-        test_data_all = [d for d in data if d["project"] == held_out_project]
+            # Test: non-overlapping windows from held-out project
+            test_data_all = [d for d in data if d["project"] == held_out_project]
 
-        by_sound = defaultdict(list)
-        for d in test_data_all:
-            by_sound[d["sound_id"]].append(d)
+            by_sound = defaultdict(list)
+            for d in test_data_all:
+                by_sound[d["sound_id"]].append(d)
 
-        test_data = []
-        for sound_id, sound_windows in by_sound.items():
-            for d in sound_windows:
-                if d["start"] % window_size_samples == 0:
-                    test_data.append(d)
+            test_data = []
+            for sound_id, sound_windows in by_sound.items():
+                for d in sound_windows:
+                    if d["start"] % window_size_samples == 0:
+                        test_data.append(d)
 
-        print(
-            f"  Test: {len(test_data_all)} total -> {len(test_data)} (non-overlapping)"
-        )
+            print(
+                f"  Test: {len(test_data_all)} total -> "
+                f"{len(test_data)} (non-overlapping)"
+            )
 
-        # Train/Val: remaining projects, with overlaps within segments
-        remaining_data = [d for d in data if d["project"] != held_out_project]
+            # Train/Val: remaining projects, with overlaps within segments
+            remaining_data = [d for d in data if d["project"] != held_out_project]
 
-        X = list(range(len(remaining_data)))
-        y = [d["label"] for d in remaining_data]
-        groups = [d["sound_id"] for d in remaining_data]
+            X = list(range(len(remaining_data)))
+            y = [d["label"] for d in remaining_data]
+            groups = [d["sound_id"] for d in remaining_data]
 
-        gss = GroupShuffleSplit(
-            n_splits=1,
-            test_size=config.splits.val_size,
-            random_state=config.splits.random_state,
-        )
-        train_idx, val_idx = next(gss.split(X, y, groups=groups))
+            gss = GroupShuffleSplit(
+                n_splits=1,
+                test_size=config.splits.val_size,
+                random_state=config.splits.random_state,
+            )
+            train_idx, val_idx = next(gss.split(X, y, groups=groups))
 
-        train_data = [remaining_data[i] for i in train_idx]
-        val_data = [remaining_data[i] for i in val_idx]
+            train_data = [remaining_data[i] for i in train_idx]
+            val_data = [remaining_data[i] for i in val_idx]
 
-        save_csv(train_data, os.path.join(fold_dir, "train_split.csv"))
-        save_csv(val_data, os.path.join(fold_dir, "val_split.csv"))
-        save_csv(test_data, os.path.join(fold_dir, "test_split.csv"))
+            save_csv(train_data, os.path.join(fold_dir, "train_split.csv"))
+            save_csv(val_data, os.path.join(fold_dir, "val_split.csv"))
+            save_csv(test_data, os.path.join(fold_dir, "test_split.csv"))
 
-        # Per-fold statistics
-        print(f"  Train: {len(train_data)} (with overlaps within segments)")
-        print(f"  Val:   {len(val_data)} (with overlaps within segments)")
-        print(f"  Test:  {len(test_data)} (non-overlapping)")
+            # Per-fold statistics
+            print(f"  Train: {len(train_data)} (with overlaps within segments)")
+            print(f"  Val:   {len(val_data)} (with overlaps within segments)")
+            print(f"  Test:  {len(test_data)} (non-overlapping)")
 
-        for name, split_data in [
-            ("Train", train_data),
-            ("Val", val_data),
-            ("Test", test_data),
-        ]:
-            label_counts = defaultdict(int)
-            proj_counts = defaultdict(int)
-            for d in split_data:
-                label_counts[d["label"]] += 1
-                proj_counts[d["project"]] += 1
-            print(f"    {name} labels: {dict(label_counts)}")
-            print(f"    {name} projects: {dict(proj_counts)}")
+            for name, split_data in [
+                ("Train", train_data),
+                ("Val", val_data),
+                ("Test", test_data),
+            ]:
+                label_counts = defaultdict(int)
+                proj_counts = defaultdict(int)
+                for d in split_data:
+                    label_counts[d["label"]] += 1
+                    proj_counts[d["project"]] += 1
+                print(f"    {name} labels: {dict(label_counts)}")
+                print(f"    {name} projects: {dict(proj_counts)}")
 
-        fold_stats.append(
-            {
-                "fold": fold_name,
-                "train": len(train_data),
-                "val": len(val_data),
-                "test": len(test_data),
-            }
-        )
+            fold_stats.append(
+                {
+                    "fold": fold_name,
+                    "train": len(train_data),
+                    "val": len(val_data),
+                    "test": len(test_data),
+                }
+            )
+        _replace_staged_folds(staging_base, folds_base, backup_base)
+    finally:
+        if os.path.isdir(staging_base) and not os.path.islink(staging_base):
+            shutil.rmtree(staging_base)
 
     print(f"\n{'=' * 60}")
     print("SUMMARY")
@@ -577,7 +689,7 @@ def load_segmented_windows_if_exists(
     version: str = DEFAULT_DATASET_VERSION,
 ) -> Optional[List[dict]]:
     """Load segmented windows from file if they exist."""
-    segmented_path = segmented_mapping_path(config, version)
+    segmented_path = segmented_mapping_path(config, version, writable=False)
 
     if os.path.exists(segmented_path):
         with open(segmented_path, "r") as f:
@@ -625,7 +737,7 @@ Examples:
     )
     parser.add_argument(
         "--version",
-        type=validate_dataset_version,
+        type=validate_writable_dataset_version,
         default=DEFAULT_DATASET_VERSION,
         help=(
             "Dataset revision suffix for segmented mapping and folds "
