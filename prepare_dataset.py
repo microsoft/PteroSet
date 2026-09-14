@@ -443,12 +443,19 @@ def run_splits(
     projects = sorted(set(d["project"] for d in data))
     print(f"\nProjects ({len(projects)}): {projects}")
 
+    if os.path.islink(folds_base):
+        raise ValueError(f"folds directory must not be a symlink: {folds_base}")
     if os.path.isdir(folds_base):
-        for entry in os.scandir(folds_base):
-            is_generated_fold = entry.is_dir(
-                follow_symlinks=False
-            ) and entry.name.startswith("fold_")
-            if is_generated_fold:
+        generated_entries = [
+            entry for entry in os.scandir(folds_base) if entry.name.startswith("fold_")
+        ]
+        for entry in generated_entries:
+            if entry.is_symlink():
+                raise ValueError(
+                    f"generated fold path must not be a symlink: {entry.path}"
+                )
+        for entry in generated_entries:
+            if entry.is_dir(follow_symlinks=False):
                 shutil.rmtree(entry.path)
     os.makedirs(folds_base, exist_ok=True)
 

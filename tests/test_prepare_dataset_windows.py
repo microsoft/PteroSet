@@ -171,6 +171,73 @@ def test_supports_general_window_and_overlap_values(tmp_path):
     ]
 
 
+def test_build_segmented_windows_rounds_fractional_width_and_hop():
+    windows = build_segmented_windows(
+        annotations_data={
+            "sounds": [
+                {
+                    "id": 1,
+                    "file_name_path": "MAP1.wav",
+                    "duration": 1,
+                    "sample_rate": 10,
+                    "project": "MAP1",
+                }
+            ],
+            "annotations": [],
+        },
+        datasets=["MAP1"],
+        sample_rate=10,
+        window_size_sec=0.27,
+        overlap_sec=0.11,
+        segment_duration_sec=1,
+    )
+
+    assert [(window["start"], window["end"]) for window in windows] == [
+        (0, 3),
+        (2, 5),
+        (4, 7),
+        (6, 9),
+    ]
+    assert {window["end"] - window["start"] for window in windows} == {3}
+
+
+def test_labels_are_isolated_by_sound_id():
+    windows = build_segmented_windows(
+        annotations_data={
+            "sounds": [
+                {
+                    "id": 1,
+                    "file_name_path": "MAP1-1.wav",
+                    "duration": 10,
+                    "sample_rate": 100,
+                    "project": "MAP1",
+                },
+                {
+                    "id": 2,
+                    "file_name_path": "MAP1-2.wav",
+                    "duration": 10,
+                    "sample_rate": 100,
+                    "project": "MAP1",
+                },
+            ],
+            "annotations": [
+                {"sound_id": 1, "t_min": 0.2, "t_max": 0.4, "category_id": 0}
+            ],
+        },
+        datasets=["MAP1"],
+        sample_rate=100,
+        window_size_sec=5,
+        overlap_sec=4,
+    )
+
+    labels_by_sound = {
+        sound_id: [window["label"] for window in windows if window["sound_id"] == sound_id]
+        for sound_id in (1, 2)
+    }
+    assert labels_by_sound[1] == [1, 0, 0, 0, 0, 0]
+    assert labels_by_sound[2] == [0, 0, 0, 0, 0, 0]
+
+
 def test_ignores_raw_and_segmented_caches_and_rederives_labels(tmp_path):
     annotations = {
         "sounds": [
@@ -417,6 +484,49 @@ def test_splits_use_window_dataset_without_metadata_csv(tmp_path):
         for row in rows:
             assert row["dataset"] in {"MAP1", "PPA1", "PPA2"}
             assert row["dataset"] == row["project"]
+
+
+def test_rejects_v5_fold_symlink_without_touching_v4(tmp_path):
+    config = _config(tmp_path, {"sounds": [], "annotations": []})
+    historical_fold = tmp_path / "folds_segmented_v4" / "fold_0_MAP1_segmented"
+    historical_fold.mkdir(parents=True)
+    sentinel = historical_fold / "sentinel.txt"
+    sentinel.write_text("historical-v4")
+    (tmp_path / "folds_segmented_v5").symlink_to(
+        tmp_path / "folds_segmented_v4",
+        target_is_directory=True,
+    )
+
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        prepare_dataset.run_splits(config, [], version="v5")
+
+    assert sentinel.read_text() == "historical-v4"
+    assert historical_fold.is_dir()
+
+
+def test_rejects_generated_fold_symlink_without_touching_v4(tmp_path):
+    config = _config(tmp_path, {"sounds": [], "annotations": []})
+    historical_fold = tmp_path / "folds_segmented_v4" / "fold_0_MAP1_segmented"
+    historical_fold.mkdir(parents=True)
+    sentinel = historical_fold / "sentinel.txt"
+    sentinel.write_text("historical-v4")
+    v5_root = tmp_path / "folds_segmented_v5"
+    v5_root.mkdir()
+    legitimate_fold = v5_root / "fold_1_PPA1_segmented"
+    legitimate_fold.mkdir()
+    legitimate_sentinel = legitimate_fold / "sentinel.txt"
+    legitimate_sentinel.write_text("existing-v5")
+    (v5_root / "fold_0_MAP1_segmented").symlink_to(
+        historical_fold,
+        target_is_directory=True,
+    )
+
+    with pytest.raises(ValueError, match="fold path must not be a symlink"):
+        prepare_dataset.run_splits(config, [], version="v5")
+
+    assert sentinel.read_text() == "historical-v4"
+    assert historical_fold.is_dir()
+    assert legitimate_sentinel.read_text() == "existing-v5"
 
 
 def test_split_non_overlap_filter_uses_rounded_window_samples(tmp_path):
