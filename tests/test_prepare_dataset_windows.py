@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import csv
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ def _config(tmp_path: Path, annotations: dict, **audio_overrides):
         "sample_rate": 100,
         "window_size_sec": 5.0,
         "overlap_sec": 4.0,
+        "window_strategy": "sliding",
     }
     audio.update(audio_overrides)
     return SimpleNamespace(
@@ -28,7 +30,9 @@ def _config(tmp_path: Path, annotations: dict, **audio_overrides):
         paths=SimpleNamespace(
             annotations_path=str(annotations_path),
             data_root=str(tmp_path),
+            spectrograms_dir=str(tmp_path / "spectrograms"),
         ),
+        splits=SimpleNamespace(val_size=0.5, random_state=42),
     )
 
 
@@ -182,8 +186,10 @@ def test_ignores_raw_and_segmented_caches_and_rederives_labels(tmp_path):
     }
     config = _config(tmp_path, annotations)
     raw_cache = tmp_path / "windows_mapping_4.0overlap.json"
-    segmented_cache = tmp_path / "windows_mapping_4.0overlap_segmented.json"
+    historical_v4 = tmp_path / "windows_mapping_4.0overlap_segmented_v4.json"
+    segmented_cache = tmp_path / "windows_mapping_4.0overlap_segmented_v5.json"
     raw_cache.write_text(json.dumps([{"sound_id": 1, "start": 0, "end": 500}]))
+    historical_v4.write_text(json.dumps([{"label": 4}]))
     segmented_cache.write_text(json.dumps([{"label": 99}]))
 
     first = run_segment_windows(config)
@@ -205,6 +211,7 @@ def test_ignores_raw_and_segmented_caches_and_rederives_labels(tmp_path):
     third = run_segment_windows(config)
     assert {window["label"] for window in third} == {0}
     assert json.loads(segmented_cache.read_text()) == third
+    assert json.loads(historical_v4.read_text()) == [{"label": 4}]
 
 
 @pytest.mark.parametrize(
@@ -247,7 +254,9 @@ def test_spectrogram_step_regenerates_and_uses_segmented_windows(
     received = []
     monkeypatch.setattr(prepare_dataset, "load_config", lambda _: config)
     monkeypatch.setattr(
-        prepare_dataset, "run_segment_windows", lambda _: generated
+        prepare_dataset,
+        "run_segment_windows",
+        lambda _, version: generated,
     )
     monkeypatch.setattr(
         prepare_dataset,
@@ -268,6 +277,198 @@ def test_spectrogram_step_regenerates_and_uses_segmented_windows(
     prepare_dataset.main()
 
     assert received == generated
+
+
+def test_versioned_mapping_and_fold_paths_do_not_overwrite_v4(tmp_path):
+    config = _config(tmp_path, {"sounds": [], "annotations": []})
+    historical_v4 = tmp_path / "windows_mapping_4.0overlap_segmented_v4.json"
+    historical_v4.write_text("historical")
+
+    prepare_dataset.run_segment_windows(config, version="v5")
+
+    assert historical_v4.read_text() == "historical"
+    assert (tmp_path / "windows_mapping_4.0overlap_segmented_v5.json").exists()
+
+
+def test_rejects_historical_fold_destination_without_deleting_it(tmp_path):
+    config = _config(tmp_path, {"sounds": [], "annotations": []})
+    historical_fold = tmp_path / "folds_segmented_v4" / "fold_0_MAP1_segmented"
+    historical_fold.mkdir(parents=True)
+    historical_csv = historical_fold / "train_split.csv"
+    historical_csv.write_text("historical")
+
+    with pytest.raises(ValueError, match="folds_subdir must be"):
+        prepare_dataset.run_splits(
+            config,
+            [],
+            folds_subdir="folds_segmented_v4",
+            version="v5",
+        )
+
+    assert historical_csv.read_text() == "historical"
+
+
+@pytest.mark.parametrize("version", ["v4", "v1", "../v5", "v5/test", "5"])
+def test_rejects_historical_or_invalid_output_versions(tmp_path, version):
+    config = _config(tmp_path, {"sounds": [], "annotations": []})
+
+    with pytest.raises(ValueError, match="historical|form vN"):
+        prepare_dataset.run_segment_windows(config, version=version)
+
+
+def test_rejects_non_sliding_window_strategy(tmp_path):
+    config = _config(
+        tmp_path,
+        {"sounds": [], "annotations": []},
+        window_strategy="balanced",
+    )
+
+    with pytest.raises(ValueError, match="window_strategy='sliding'"):
+        prepare_dataset.run_segment_windows(config)
+
+
+def test_split_step_regenerates_versioned_windows(tmp_path, monkeypatch):
+    config = _config(tmp_path, {"sounds": [], "annotations": []})
+    generated = [{"window_id": 0, "dataset": "MAP1"}]
+    calls = []
+    monkeypatch.setattr(prepare_dataset, "load_config", lambda _: config)
+    monkeypatch.setattr(
+        prepare_dataset,
+        "run_segment_windows",
+        lambda _, version: calls.append(("generate", version)) or generated,
+    )
+    monkeypatch.setattr(
+        prepare_dataset,
+        "run_splits",
+        lambda _, windows, version: calls.append(("split", windows, version)),
+    )
+    monkeypatch.setattr(
+        prepare_dataset,
+        "load_segmented_windows_if_exists",
+        lambda *_args, **_kwargs: pytest.fail("stale mapping must not be loaded"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare_dataset.py",
+            "--config",
+            "config.yaml",
+            "--steps",
+            "splits",
+            "--version",
+            "v5",
+        ],
+    )
+
+    prepare_dataset.main()
+
+    assert calls == [("generate", "v5"), ("split", generated, "v5")]
+
+
+def test_splits_use_window_dataset_without_metadata_csv(tmp_path):
+    sounds = []
+    windows = []
+    spectrograms_dir = tmp_path / "spectrograms"
+    spectrograms_dir.mkdir()
+    window_id = 0
+    for project_index, project in enumerate(("MAP1", "PPA1", "PPA2")):
+        for sound_index in range(2):
+            sound_id = project_index * 10 + sound_index
+            file_name = f"{project}-{sound_index}.wav"
+            sounds.append(
+                {
+                    "id": sound_id,
+                    "file_name_path": file_name,
+                    "duration": 10,
+                    "sample_rate": 100,
+                    "project": project,
+                }
+            )
+            windows.append(
+                {
+                    "window_id": window_id,
+                    "dataset": project,
+                    "sample_rate": 100,
+                    "sound_id": sound_id,
+                    "start": 0,
+                    "end": 500,
+                    "label": sound_index % 2,
+                }
+            )
+            window_id += 1
+            (spectrograms_dir / f"{project}-{sound_index}_0_500.npy").touch()
+
+    config = _config(tmp_path, {"sounds": sounds, "annotations": []})
+    stale_fold = tmp_path / "folds_segmented_v5" / "fold_9_STALE_segmented"
+    stale_fold.mkdir(parents=True)
+    (stale_fold / "train_split.csv").write_text("stale")
+    prepare_dataset.run_splits(config, windows, version="v5")
+
+    folds_root = tmp_path / "folds_segmented_v5"
+    assert folds_root.is_dir()
+    assert not stale_fold.exists()
+    assert not (tmp_path / "metadata.csv").exists()
+    csv_paths = list(folds_root.glob("*/*_split.csv"))
+    assert csv_paths
+    for csv_path in csv_paths:
+        with csv_path.open() as csv_file:
+            rows = list(csv.DictReader(csv_file))
+        for row in rows:
+            assert row["dataset"] in {"MAP1", "PPA1", "PPA2"}
+            assert row["dataset"] == row["project"]
+
+
+def test_split_non_overlap_filter_uses_rounded_window_samples(tmp_path):
+    sounds = []
+    windows = []
+    spectrograms_dir = tmp_path / "spectrograms"
+    spectrograms_dir.mkdir()
+    for project_index, project in enumerate(("MAP1", "PPA1", "PPA2")):
+        for sound_index in range(2):
+            sound_id = project_index * 10 + sound_index
+            file_name = f"{project}-{sound_index}.wav"
+            sounds.append(
+                {
+                    "id": sound_id,
+                    "file_name_path": file_name,
+                    "duration": 10,
+                    "sample_rate": 10,
+                    "project": project,
+                }
+            )
+            windows.append(
+                {
+                    "window_id": len(windows),
+                    "dataset": project,
+                    "sample_rate": 10,
+                    "sound_id": sound_id,
+                    "start": 3,
+                    "end": 6,
+                    "label": 0,
+                }
+            )
+            (spectrograms_dir / f"{project}-{sound_index}_3_6.npy").touch()
+
+    config = _config(
+        tmp_path,
+        {"sounds": sounds, "annotations": []},
+        sample_rate=10,
+        window_size_sec=0.26,
+        overlap_sec=0.0,
+    )
+    prepare_dataset.run_splits(config, windows, version="v5")
+
+    test_csv = (
+        tmp_path
+        / "folds_segmented_v5"
+        / "fold_0_MAP1_segmented"
+        / "test_split.csv"
+    )
+    with test_csv.open() as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    assert len(rows) == 2
+    assert {int(row["start"]) for row in rows} == {3}
 
 
 def test_current_annotations_produce_expected_project_totals():
