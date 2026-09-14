@@ -99,6 +99,7 @@ def generate_overlapping_test_csvs(
 
     # Enrich windows with spec_name, sound_filename, project
     enriched = []
+    missing_spectrograms = []
     for w in segmented_windows:
         sound = sounds.get(str(w['sound_id']))
         if sound is None:
@@ -126,7 +127,11 @@ def generate_overlapping_test_csvs(
             raise ValueError(
                 f"Unsupported project {project!r} for sound_id {w['sound_id']!r}"
             )
-        if not os.path.exists(os.path.join(spectrograms_dir, spec_name)):
+        spec_path = os.path.join(spectrograms_dir, spec_name)
+        if not os.path.isfile(spec_path):
+            missing_spectrograms.append(
+                (w['window_id'], os.path.abspath(spec_path))
+            )
             continue
         enriched.append({
             'window_id': w['window_id'],
@@ -139,6 +144,16 @@ def generate_overlapping_test_csvs(
             'sound_filename': sound_fname,
             'project': project,
         })
+
+    if missing_spectrograms:
+        examples = ", ".join(
+            f"window {window_id}: {path}"
+            for window_id, path in missing_spectrograms[:5]
+        )
+        raise FileNotFoundError(
+            f"Missing {len(missing_spectrograms)} expected spectrogram files; "
+            f"no evaluation inputs were written. Examples: {examples}"
+        )
 
     fieldnames = ['window_id', 'dataset', 'sample_rate', 'sound_id',
                   'start', 'end', 'label', 'spec_name', 'sound_filename', 'project']

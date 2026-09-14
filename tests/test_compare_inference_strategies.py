@@ -275,3 +275,47 @@ def test_rejects_unsupported_project_identity(tmp_path, monkeypatch):
             str(tmp_path / "staging"),
             "v3",
         )
+
+
+def test_missing_spectrograms_abort_before_writing_evaluation_inputs(
+    tmp_path,
+    monkeypatch,
+):
+    config = _config(tmp_path)
+    folds = _fold_dirs(tmp_path, {"MAP1": [(10, "sound.wav")]})
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(
+        compare_inference_strategies,
+        "spectrogram_filename",
+        lambda _file_name, start, _end: f"missing_{start}.npy",
+    )
+    windows = [
+        {
+            "window_id": 42,
+            "dataset": "MAP1",
+            "sound_id": 10,
+            "start": 0,
+            "end": 500,
+        },
+        {
+            "window_id": 43,
+            "dataset": "MAP1",
+            "sound_id": 10,
+            "start": 100,
+            "end": 600,
+        },
+    ]
+
+    with pytest.raises(
+        FileNotFoundError,
+        match=r"Missing 2 expected spectrogram files.*window 42.*window 43",
+    ):
+        compare_inference_strategies.generate_overlapping_test_csvs(
+            config,
+            windows,
+            str(folds),
+            str(staging),
+            "v3",
+        )
+
+    assert not staging.exists()
