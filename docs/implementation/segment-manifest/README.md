@@ -53,20 +53,69 @@ exclude 1,822 valid windows.
 
 ### Corrected flow
 
-Segmented windows are now generated directly from the current annotations and
-the shared segment geometry:
+`prepare_dataset.py` now generates segmented windows directly from the current
+annotations and the shared segment geometry. It does not read the segment
+manifest CSV or either an unsegmented or segmented window cache:
 
 ```text
-current annotations + segment geometry -> segmented windows
-                                       -> required spectrograms
-                                       -> folds -> checkpoints
+current annotations + segment geometry
+    -> v5 segmented mapping
+    -> required spectrograms
+    -> v5 folds
+    -> separate training/evaluation -> v5 checkpoints and outputs
 ```
 
-Each complete 10-second segment contributes six 5-second windows at a
-1-second step. Generation no longer requires the recording-level windows
-cache to contain every candidate window. Spectrogram generation consumes the
-new segmented mapping so that every mapped window has its required
-spectrogram.
+With the default configuration, each complete 10-second segment contributes
+six 5-second windows at a 1-second step. Other window/overlap values are
+supported when they fit within a segment, but annotation-driven segmented
+generation requires `audio.window_strategy: sliding`; another strategy fails
+with an explicit error.
+
+Project identity comes first from each annotation sound's `project` field. For
+compatibility with older annotation files, generation falls back to matching
+one of `config.datasets` in `file_name_path`. The optional metadata CSV used
+by the manifest generator is not a project-identity input to
+`prepare_dataset.py`.
+
+### v5 paths and CLI behavior
+
+The corrected dataset is an explicit v5 revision. With `data/config.yaml`, the
+default command writes:
+
+- mapping: `data/windows_mapping_4.0overlap_segmented_v5.json`;
+- folds: `data/folds_segmented_v5/`.
+
+`--version` accepts revision suffixes in the form `vN`, where `N >= 5`.
+Its default is v5. Versions v1-v4 are rejected as historical, read-only
+destinations. This prevents the corrected generator and split writer from
+overwriting the existing v1-v4 mappings or fold directories. A later revision
+can use, for example, `--version v6`.
+
+The default pipeline is:
+
+```bash
+python prepare_dataset.py --config data/config.yaml
+```
+
+Its default steps are `stats segment_windows spectrograms splits`; the legacy
+recording-level `windows` step is not part of the default. Both a
+spectrogram-only and a split-only invocation first regenerate the selected
+version's segmented mapping from annotations:
+
+```bash
+python prepare_dataset.py --config data/config.yaml \
+    --steps spectrograms --version v5
+
+python prepare_dataset.py --config data/config.yaml \
+    --steps splits --version v5
+```
+
+The split-only command then rebuilds generated `fold_*` directories under
+`data/folds_segmented_v5/`, using only windows whose spectrogram files already
+exist. It does not create missing spectrograms. Therefore, split-only
+regeneration is safe after the v5 spectrogram set is complete, but running it
+against only the old v4 spectrogram set would omit the recovered windows from
+the CSVs.
 
 ### Verified expected counts
 
@@ -107,12 +156,17 @@ record a specific historical source without additional provenance evidence.
 ### Artifact migration
 
 The corrected mapping is a dataset revision, not an in-place reinterpretation
-of v4 results. Rebuild the segmented mapping, generate all spectrograms
-required by it, regenerate folds/splits, and retrain/evaluate checkpoints.
-Window IDs and downstream row assignments may change when the omitted windows
-are inserted, so existing folds must not be combined with the corrected
-mapping by ID. Retain old v4 checkpoints only as results for the 160,244-window
-dataset; they do not include the 1,822 recovered windows.
+of v4 results. Preserve v1-v4 artifacts. Build the v5 mapping, ensure
+spectrograms exist for all v5 windows, regenerate `folds_segmented_v5`, and
+train/evaluate new v5 checkpoints and outputs. Window IDs and downstream row
+assignments change when omitted windows are inserted, so a v4 fold CSV must
+not be combined with the v5 mapping by ID.
+
+The existing `checkpoints_v4/` and `outputs_v4/` remain historical results for
+the 160,244-window dataset. They were trained without the 1,822 recovered
+windows and are not results for the corrected v5 dataset. Do not rename or
+report them as v5; corrected publication results require v5 retraining and
+evaluation.
 
 ## Time semantics
 
@@ -234,4 +288,6 @@ Suggested concise wording for reviews or change summaries:
 > dataset and checkpoints at 160,244 windows. The corrected expected total is
 > 162,066: five short PPA4 recordings account for the 78-window reduction from
 > the otherwise expected 162,144. The segment math was not the fault; the
-> upstream cache was stale.
+> upstream cache was stale. The corrected artifacts use explicit v5 mapping,
+> fold, output, and checkpoint paths; v1-v4 remain preserved as historical
+> revisions.
