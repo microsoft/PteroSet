@@ -25,13 +25,18 @@ python download_data.py
 
 This downloads and extracts the PteroSet dataset from Zenodo into the `data/` directory. The Zenodo record contains the following files:
 
-- `audios.zip` — Audio recordings
+- `MAP1.zip` — Audio recordings from project MAP1
+- `PPA1.zip` — Audio recordings from project PPA1
+- `PPA2.zip` — Audio recordings from project PPA2
+- `PPA3.zip` — Audio recordings from project PPA3
+- `PPA4.zip` — Audio recordings from project PPA4
 - `labels.zip` — RAVEN Pro annotation files
 - `annotations_identification.json` — Identification-level annotations (COCO format)
 - `annotations_species.json` — Species-level annotations (COCO format)
-- `metadata.csv` — Audio file metadata
+- `metadata_v2.csv` — Audio file metadata
 - `species.csv` — Species reference data
 - `checkpoints.zip` — Pretrained model checkpoints
+- `segment_manifest.csv` — File containing the 10 sec segments in the timelapse audios
 
 Optional arguments:
 
@@ -40,6 +45,7 @@ Optional arguments:
 | `--output-dir DIR` | Directory to save and extract data | `data/` |
 | `--keep-zip` | Keep ZIP files after extraction | off |
 | `--workers N` | Parallel connections per file | 8 |
+| `--record_id` | Zenodo record ID | Last version |
 
 ### 3. Create Annotations
 

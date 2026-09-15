@@ -1,5 +1,11 @@
 __pycache__/
 tests/
+data/MAP1/
+data/PPA1/
+data/PPA2/
+data/PPA3/
+data/PPA4/
+data/checkpoints/
 data/audios_48kHz/
 data/labels_48kHz/
 data/spectrograms/

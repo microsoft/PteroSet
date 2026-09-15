@@ -2,6 +2,18 @@ from PytorchWildlife.data.bioacoustics.bioacoustics_annotations import BaseReade
 import pandas as pd
 import argparse
 import os
+from pathlib import Path
+
+RECORD_ID = "21829388"  # kept in sync with the Zenodo URL in add_dataset_info
+
+
+def _find_metadata_file(data_path):
+    """Return the metadata*.csv file in data_path (there should be exactly one)."""
+    candidates = list(Path(data_path).glob("metadata*.csv"))
+    if not candidates:
+        raise FileNotFoundError(f"No metadata*.csv file found in {data_path}")
+    return candidates[0].name
+
 
 class HumboldtAves(BaseReader):
     def __init__(self, data_path, annotation_level="species"):
@@ -18,31 +30,39 @@ class HumboldtAves(BaseReader):
         if annotation_level not in ("species", "identification"):
             raise ValueError("annotation_level must be 'species' or 'identification'")
         self.annotation_level = annotation_level
-        self.sound_files_path = os.path.join(self.data_path, "audios_192khz")
-        self.annotation_files_path = os.path.join(self.data_path, "labels_48khz")
+        self.annotation_files_path = os.path.join(self.data_path, "labels") 
         self.species_file = os.path.join(self.data_path, "species.csv")
-        self.metadata_file = os.path.join(self.data_path, "metadata.csv")
+        metadata_filename = _find_metadata_file(self.data_path)
+        breakpoint()
+        self.metadata_file = os.path.join(self.data_path, metadata_filename)
         self.output_path = os.path.join(data_path, f"annotations_{annotation_level}.json")
 
     def add_dataset_info(self):
         self.annotation_creator.add_info(
-            url = "https://zenodo.org/records/18563039"
+            url = f"https://zenodo.org/records/{RECORD_ID}"
         )
-
+        
     def add_sounds(self):
-        flac_files = [f for f in os.listdir(self.sound_files_path) if f.endswith('.wav')]
+        # Instead of iterating over the files in the directory, 
+        # we will read the metadata CSV to get the list of audio files and their associated information.
+
         metadata = pd.read_csv(self.metadata_file)
-        for i, file_name in enumerate(flac_files):
-            file_path = os.path.join(self.sound_files_path, file_name)
+        i = 0
+        for _, file_metadata in metadata.iterrows():
+            file_name = file_metadata["audio_file"]
+            project = file_metadata["project_name"] #project name to get the folder name
+            sound_dir = os.path.join(self.data_path, project)
+            file_path = os.path.join(sound_dir, file_name)
+            if not os.path.exists(file_path):
+                continue
             duration, sample_rate = self.annotation_creator._get_duration_and_sample_rate(file_path)
-            file_metadata = metadata[metadata['audio_file'] == file_name]
-            latitude = file_metadata["latitude"].values[0] if not file_metadata.empty else None
-            longitude = file_metadata["longitude"].values[0] if not file_metadata.empty else None
-            date_recorded = str(file_metadata["date_recorded"].values[0]) if not file_metadata.empty else None
-            project = file_metadata["project_name"].values[0] if not file_metadata.empty else None
+            latitude = file_metadata["latitude"]
+            longitude = file_metadata["longitude"]
+            date_recorded = str(file_metadata["date_recorded"])
+            #breakpoint()
             self.annotation_creator.add_sound(
                 id=i,
-                file_name_path= os.path.join(os.path.relpath(self.sound_files_path, ".."), file_name),
+                file_name_path=os.path.join(os.path.relpath(sound_dir, "."), file_name),
                 duration=duration,
                 sample_rate=sample_rate,
                 latitude=latitude,
@@ -50,6 +70,7 @@ class HumboldtAves(BaseReader):
                 date_recorded=date_recorded,
                 project=project
             )
+            i += 1
 
     def add_categories(self):
         categories_df = pd.read_csv(self.species_file)
@@ -112,5 +133,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    reader = HumboldtAves(".", annotation_level=args.annotation_level)
+    data_dir = Path(__file__).resolve().parent #define data_path as the directory where the script is located
+    reader = HumboldtAves(data_dir, annotation_level=args.annotation_level)
     reader.process_dataset()

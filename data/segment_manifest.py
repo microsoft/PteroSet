@@ -380,6 +380,7 @@ def select_segment(
     records: Sequence[SegmentRecord], segment_id: str
 ) -> SegmentRecord:
     """Select exactly one manifest segment by its stable ID."""
+    breakpoint()
     matches = [record for record in records if record.segment_id == segment_id]
     if not matches:
         raise ValueError(f"segment_id {segment_id!r} was not found")

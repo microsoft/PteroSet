@@ -24,10 +24,11 @@ from urllib3.util.retry import Retry
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-RECORD_ID = "18563039"
-ZENODO_FILES_URL = f"https://zenodo.org/api/records/{RECORD_ID}/files"
-DOWNLOAD_DIR = Path(__file__).resolve().parent
+# Zenodo "concept" record ID: stays constant across all versions of the
+# dataset, so resolving it via /versions/latest always gets the newest one.
+CONCEPT_RECORD_ID = "18554918"
 
+DOWNLOAD_DIR = Path(__file__).resolve().parent
 DEFAULT_WORKERS = 8
 CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per parallel chunk
 MAX_RETRIES = 5
@@ -56,11 +57,21 @@ def _make_session() -> requests.Session:
 
 # ── Zenodo API ───────────────────────────────────────────────────────────────
 
-def get_file_list() -> list[dict]:
+def get_file_list(zenodo_files_url) -> list[dict]:
     """Fetch the list of files in the Zenodo record."""
-    resp = _make_session().get(ZENODO_FILES_URL, timeout=REQUEST_TIMEOUT)
+    resp = _make_session().get(zenodo_files_url, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     return resp.json()["entries"]
+
+
+def get_latest_files_url(concept_record_id: str) -> str:
+    """Resolve the files URL of the latest version of a Zenodo record series."""
+    resp = _make_session().get(
+        f"https://zenodo.org/api/records/{concept_record_id}/versions/latest",
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()["links"]["files"]
 
 
 # ── Download ─────────────────────────────────────────────────────────────────
@@ -185,6 +196,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_WORKERS,
         help=f"Parallel connections per file (default: {DEFAULT_WORKERS}).",
     )
+    parser.add_argument(
+        "--record_id",
+        type=str,
+        default=None,
+        help=f"Zenodo record ID (default: last version).",
+    )
     return parser.parse_args()
 
 
@@ -195,8 +212,15 @@ def main() -> None:
     dest = Path(args.output_dir)
     dest.mkdir(parents=True, exist_ok=True)
 
-    print(f"Fetching file list for Zenodo record {RECORD_ID} ...")
-    files = get_file_list()
+    if args.record_id is None:
+        print("Fetching file list from Zenodo's latest version ...")
+        zenodo_files_url = get_latest_files_url(CONCEPT_RECORD_ID)
+    else:
+        print(f"Fetching file list for Zenodo record {args.record_id} ...")
+        zenodo_files_url = f"https://zenodo.org/api/records/{args.record_id}/files"
+
+    
+    files = get_file_list(zenodo_files_url)
     print(f"Found {len(files)} file(s):")
     for entry in files:
         print(f"  • {entry['key']}  ({entry['size'] / (1024 ** 2):.1f} MB)")

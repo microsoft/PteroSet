@@ -24,11 +24,14 @@ import librosa
 import librosa.display
 from matplotlib.patches import Rectangle
 
+from data_reader import _find_metadata_file
+
 # ── Paths ────────────────────────────────────────────────────────────────
 ROOT = os.path.dirname(os.path.abspath(__file__))
 ANNOTATIONS_PATH = os.path.join(ROOT, "annotations_species.json")
 SPECTROGRAMS_DIR = os.path.join(ROOT, "spectrograms")
 OUTPUT_DIR = os.path.join(ROOT, "annotations_examples")
+METADATA_FILENAME = _find_metadata_file(ROOT)
 
 # ── Audio / spectrogram config (must match config.yaml) ─────────────────
 SR = 48000
@@ -673,7 +676,7 @@ def print_data_statistics():
     annotations_identification = data_id["annotations"]
     
     # Load metadata
-    metadata_path = os.path.join(ROOT, "metadata.csv")
+    metadata_path = os.path.join(ROOT, METADATA_FILENAME)
     metadata = pd.read_csv(metadata_path)
     
     # ── 1. AUDIO DURATION STATISTICS ──
@@ -853,7 +856,7 @@ def print_statistics_by_project():
     annotations_identification = data_id["annotations"]
     
     # Load metadata
-    metadata_path = os.path.join(ROOT, "metadata.csv")
+    metadata_path = os.path.join(ROOT, METADATA_FILENAME)
     metadata = pd.read_csv(metadata_path)
     
     # Create mapping: audio_file -> project_name
