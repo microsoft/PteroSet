@@ -29,6 +29,8 @@ from data.segment_utils import (
     window_is_contained_in_segment,
 )
 
+from data.data_reader import _find_metadata_file
+
 
 def spectrogram_filename(sound_path, start_sample, end_sample):
     """Build spectrogram .npy filename from audio path and sample range."""
@@ -125,7 +127,7 @@ def run_windows(config: DomainConfig) -> List[dict]:
         print(f"  - datasets: {config.datasets}")
         if strategy == "balanced":
             print(f"  - negative_proportion: {config.audio.negative_proportion}")
-
+        
         windows = build_windows(
             annotation_file=annotation_path,
             window_size_sec=config.audio.window_size_sec,
@@ -233,7 +235,7 @@ def run_segment_windows(
             if fits:
                 w_copy = dict(w)
                 w_copy["dataset"] = sound_dataset.get(w["sound_id"])
-                sr = w_copy["sample_rate"]
+                sr = config.audio.sample_rate
                 ws_sec = w_copy["start"] / sr
                 we_sec = w_copy["end"] / sr
                 w_copy["label"] = int(
@@ -290,11 +292,19 @@ def run_spectrograms(config: DomainConfig, windows: List[dict]) -> None:
 
     sounds = {s["id"]: s for s in annotations["sounds"]}
 
-    # Convert windows format to include sound_path
+    # Convert windows format to include sound_path, dropping windows that
+    # fall outside the sound's actual duration. This can happen when the
+    # cached windows mapping predates a correction to the annotations file
+    # (e.g. a sound's duration was fixed after the windows were built).
     inference_windows = []
+    skipped = 0
     for win in windows:
         sound = sounds.get(win["sound_id"])
         if sound:
+            duration_samples = int(sound["duration"] * config.audio.sample_rate)
+            if win["start"] >= duration_samples or win["end"] > duration_samples:
+                skipped += 1
+                continue
             inference_windows.append(
                 {
                     "window_id": win["window_id"],
@@ -303,6 +313,12 @@ def run_spectrograms(config: DomainConfig, windows: List[dict]) -> None:
                     "end": win["end"],
                 }
             )
+
+    if skipped:
+        print(
+            f"Skipped {skipped} window(s) that fall outside their sound's "
+            "actual duration (stale windows mapping vs. annotations)."
+        )
 
     compute_mel_spectrograms_gpu(
         windows=inference_windows,
@@ -373,7 +389,8 @@ def run_splits(
             )
 
     # Add project column via metadata
-    metadata_path = os.path.join(config.paths.data_root, "metadata.csv")
+    metadata_filename = _find_metadata_file(config.paths.data_root)
+    metadata_path = os.path.join(config.paths.data_root, metadata_filename)
     print(f"Loading metadata from: {metadata_path}")
     audio_to_project = {}
     with open(metadata_path, "r") as f:
