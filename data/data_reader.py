@@ -1,10 +1,47 @@
-from PytorchWildlife.data.bioacoustics.bioacoustics_annotations import BaseReader, AnnotationCreator
+from PytorchWildlife.data.bioacoustics.bioacoustics_annotations import BaseReader
 import pandas as pd
 import argparse
 import os
 from pathlib import Path
 
-RECORD_ID = "21829388"  # kept in sync with the Zenodo URL in add_dataset_info
+DATASET_URL = "https://doi.org/10.5281/zenodo.18554918" # Concept DOI: always resolves to the latest version of the dataset.
+PAPER_DOI = "https://doi.org/10.1038/s41597-026-08574-5"
+DATASET_VERSION = "6" # The version of the dataset that this script is compatible with. 
+DATASET_PUBLICATION_DATE = "20261116" #YYYYMMDD
+DATASET_TITLE = "PteroSet"
+DATASET_LICENSE = "cc-by-4.0"
+DATASET_DESCRIPTION = (
+    "Strongly annotated passive acoustic monitoring dataset of Neotropical bird "
+    "vocalizations recorded with AudioMoth recorders in Colombia (Puerto Asís, "
+    "Putumayo; Pijavay, Magdalena) between 2023 and 2025. Annotations were created "
+    "by experts in Raven Pro and have temporal (t_min, t_max) and spectral "
+    "(f_min, f_max) bounds. Described in: A strongly annotated passive acoustic "
+    f"dataset for tropical bird monitoring, Scientific Data (2026), {PAPER_DOI}"
+)
+
+# Authors and affiliations.
+_AI_FOR_GOOD = "Microsoft AI for Good Research Lab, Redmond, Washington, USA"
+_UNIANDES = "Center for Research and Formation in Artificial Intelligence, Universidad de Los Andes, Bogotá, Colombia"
+_HUMBOLDT = "Instituto de Investigación de Recursos Biológicos Alexander von Humboldt, Bogotá, Colombia"
+_MANACUS = "Fundación Manacus, Cali, Colombia"
+_OSA = "Osa Conservation, Puerto Jiménez, Costa Rica"
+_LSU = "Museum of Natural Sciences, Louisiana State University, Baton Rouge, USA"
+DATASET_CREATORS = [
+    {"name": "Ruiz, Daniela", "affiliations": [_AI_FOR_GOOD, _UNIANDES], "orcid": "0000-0001-6636-1173"},
+    {"name": "Ulloa, Juan Sebastian", "affiliations": [_HUMBOLDT], "orcid": "0000-0001-5666-6942"},
+    {"name": "Miao, Zhongqi", "affiliations": [_AI_FOR_GOOD], "orcid": "0000-0002-0439-8592"},
+    {"name": "Betancourt, Nicolás", "affiliations": [_HUMBOLDT]},
+    {"name": "Hernández, Andrés", "affiliations": [_AI_FOR_GOOD, _UNIANDES], "orcid": "0009-0001-2589-8473"},
+    {"name": "Demuro, Bruno", "affiliations": [_AI_FOR_GOOD], "orcid": "0000-0001-9922-8811"},
+    {"name": "Barona Cortés, Eliana", "affiliations": [_HUMBOLDT], "orcid": "0000-0002-9451-7996"},
+    {"name": "Toro Gómez, Maria Paula", "affiliations": [_HUMBOLDT], "orcid": "0000-0001-8875-6619"},
+    {"name": "Mendoza-Henao, Angela M.", "affiliations": [_MANACUS, _OSA], "orcid": "0000-0002-6752-9238"},
+    {"name": "Sierra-Ricaurte, Andres Felipe", "affiliations": [_HUMBOLDT], "orcid": "0000-0002-7168-373X"},
+    {"name": "Pérez-Peña, Sebastian Camilo", "affiliations": [_LSU], "orcid": "0000-0003-2501-2334"},
+    {"name": "Dodhia, Rahul", "affiliations": [_AI_FOR_GOOD], "orcid": "0000-0003-3812-3906"},
+    {"name": "Arbelaez, Pablo", "affiliations": [_UNIANDES], "orcid": "0000-0001-5244-2407"},
+    {"name": "Lavista Ferres, Juan M.", "affiliations": [_AI_FOR_GOOD], "orcid": "0000-0002-9654-3178"},
+]
 
 
 def _find_metadata_file(data_path):
@@ -38,7 +75,13 @@ class HumboldtAves(BaseReader):
 
     def add_dataset_info(self):
         self.annotation_creator.add_info(
-            url = f"https://zenodo.org/records/{RECORD_ID}"
+            title=DATASET_TITLE,
+            license=DATASET_LICENSE,
+            publication_date=DATASET_PUBLICATION_DATE,
+            description=DATASET_DESCRIPTION,
+            creators=DATASET_CREATORS,
+            version=DATASET_VERSION,
+            url=DATASET_URL,
         )
         
     def add_sounds(self):
@@ -83,7 +126,7 @@ class HumboldtAves(BaseReader):
         self.annotation_creator.add_categories(categories_df)
 
     def add_annotations(self):
-        files = os.listdir(self.annotation_files_path)
+        files = sorted(os.listdir(self.annotation_files_path)) # Sorted so annotation ids are the same on every machine
         anno_id = 0
         for filename in files:
             df = pd.read_csv(os.path.join(self.annotation_files_path, filename), delimiter="\t")
