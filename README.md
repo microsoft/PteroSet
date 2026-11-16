@@ -1,8 +1,8 @@
 # A strongly annotated passive acoustic dataset for tropical bird monitoring 
 
-This work is under submission to the Bioacoustics Data collection of *Scientific Data* journal.
+This repository accompanies the paper [*A strongly annotated passive acoustic dataset for tropical bird monitoring*](https://doi.org/10.1038/s41597-026-08574-5), published in the Bioacoustics Data collection of *Scientific Data* (2026). If you use this code or dataset, please cite the paper (see [Citation](#citation)).
 
-Pipeline for bird vocalization detection and classification from audio recordings using spectrogram-based deep learning models. Built on top of the [PytorchWildlife](https://github.com/microsoft/CameraTraps) library, it covers data downloading, annotation creation, dataset preparation, model training, cross-validation, and evaluation.
+This is a pipeline for bird vocalization detection and classification from audio recordings using spectrogram-based deep learning models. Built on top of the [PytorchWildlife](https://github.com/microsoft/CameraTraps) library, it covers data downloading, annotation creation, dataset preparation, model training, cross-validation, and evaluation.
 
 **Dataset**: [PteroSet](https://zenodo.org/records/21829388) (Zenodo)
 
@@ -46,6 +46,15 @@ Optional arguments:
 | `--keep-zip` | Keep ZIP files after extraction | off |
 | `--workers N` | Parallel connections per file | 8 |
 | `--record_id` | Zenodo record ID | Last version |
+| `--audio {192khz,48khz}` | Audio to download (see below) | `192khz` |
+
+**Reproducing the paper results.** The results reported in the paper were obtained from the 48 kHz audio of the first dataset version ([record 18563039](https://zenodo.org/records/18563039)). The default download gets the original 192 kHz recordings, which produce slightly different spectrograms and metrics once resampled. To reproduce the paper results, download with:
+
+```bash
+python download_data.py --audio 48khz
+```
+
+This downloads the 48 kHz audio instead of the per-project ZIPs and places each WAV in its `data/<project>/` folder, so the remaining steps are the same. All other files still come from the latest version.
 
 ### 3. Create Annotations
 
@@ -90,33 +99,12 @@ Available steps:
 - `segment_windows` — Filter windows to stay within 10-second snapshots, using
   the project geometry: PPA1 snapshot starts are 9 seconds apart (1-second
   overlap), while MAP1/PPA2/PPA3/PPA4 starts are 10 seconds apart
-- `spectrograms` — Compute mel spectrograms on GPU
+- `spectrograms` — Compute mel spectrograms on GPU. Audio is resampled to the
+  48 kHz of the config when needed. Existing spectrograms are not recomputed, so
+  the step writes a `provenance.json` (source audio sample rate and spectrogram
+  parameters) into the spectrograms folder and stops if the folder was computed
+  from different audio or parameters
 - `splits` — Create leave-one-project-out folds (segmented windows, non-overlapping test sets)
-
-### Segment manifest and extraction
-
-The segment manifest makes the same snapshot geometry explicit in a portable
-CSV and supports extracting a segment by its stable identifier:
-
-```bash
-# Generate the segment manifest
-python data/segment_manifest.py generate \
-    --annotations data/annotations_identification.json \
-    --metadata data/metadata.csv \
-    --output data/segment_manifest.csv
-
-# Extract one manifest row to a WAV
-python data/segment_manifest.py extract \
-    --manifest data/segment_manifest.csv \
-    --segment-id SEGMENT_ID \
-    --audio-root data/audios_192khz \
-    --output segment.wav
-```
-
-Metadata is optional when generating a manifest. Run
-`python data/segment_manifest.py --help` for all options. See the
-[segment manifest implementation note](data/segment-manifest-note.md)
-for the schema, time semantics, and validation expectations.
 
 ### 6. Train Model
 
@@ -140,6 +128,8 @@ python train.py --config data/config.yaml \
     --ckpt_path pretrained.ckpt --finetune true
 ```
 
+Checkpoints from training are saved to `checkpoints/` (`fold_<n>/` subfolders in cross-validation; change it with `--ckpt_dir`). The pretrained checkpoints downloaded from Zenodo are kept apart in `data/checkpoints/`.
+
 ### 7. Evaluate Model
 
 ```bash
@@ -148,22 +138,60 @@ python train.py --config data/config.yaml \
     --ckpt_path checkpoint.ckpt \
     --test_csv test_split.csv
 
+# Evaluate every fold with its own checkpoint (data/checkpoints/fold_<n>/).
+# In cross-validation --ckpt_path must be a folder, not a single .ckpt file
+python train.py --config data/config.yaml \
+    --cross_validation --fold_dir data/folds_segmented \
+    --ckpt_path data/checkpoints
+
 # Aggregate cross-validation results and plot precision-recall curves
 python plot_cv_results.py \
     --fold_dir data/folds_segmented \
     --config data/config.yaml \
-    --checkpoint_dir checkpoints
+    --checkpoint_dir data/checkpoints
 ```
+
+## Segment manifest (optional)
+
+Not needed for training or evaluation. The segment manifest makes the same
+snapshot geometry used by the `segment_windows` step explicit in a portable
+CSV and supports extracting a segment by its stable identifier:
+
+```bash
+# Generate the segment manifest
+python data/segment_manifest.py generate \
+    --annotations data/annotations_identification.json \
+    --metadata data/metadata_v2.csv \
+    --output data/segment_manifest.csv
+
+# Extract one manifest row to a WAV
+python data/segment_manifest.py extract \
+    --manifest data/segment_manifest.csv \
+    --segment-id SEGMENT_ID \
+    --audio-root data/MAP1 \
+    --output segment.wav
+```
+
+`--audio-root` is the project folder that contains the segment's WAV. The
+manifest stores sample offsets for the 192 kHz audio.
+
+Metadata is optional when generating a manifest. Run
+`python data/segment_manifest.py --help` for all options. See the
+[segment manifest implementation note](data/segment_manifest_note.md)
+for the schema, time semantics, and validation expectations.
 
 ## Project Structure
 
 ```
-birds_bioacoustics/
+PteroSet/
 ├── data/
 │   ├── config.yaml              # Central configuration
 │   ├── download_data.py         # Download dataset from Zenodo
 │   ├── data_reader.py           # Parse RAVEN labels into COCO annotations
-│   └── data_stats.py            # Dataset statistics and visualizations
+│   ├── data_stats.py            # Dataset statistics and visualizations
+│   ├── segment_manifest.py      # Generate the segment manifest and extract segments
+│   └── segment_utils.py         # Shared time-lapse segment geometry 
+│   └── segment_manifest_note.md # Segment manifest schema and time semantics  
 ├── train.py                     # Model training and evaluation
 ├── prepare_dataset.py           # Dataset preparation pipeline
 ├── plot_cv_results.py           # Cross-validation results and PR curves
@@ -172,17 +200,16 @@ birds_bioacoustics/
 └── SECURITY.md                  # Microsoft security policy
 ```
 
-## Pipeline Overview
+## Citation
 
+```bibtex
+@article{ruiz2026pteroset,
+  title     = {A strongly annotated passive acoustic dataset for tropical bird monitoring},
+  author    = {Ruiz, Daniela and Ulloa, Juan Sebasti{\'a}n and Miao, Zhongqi and Betancourt, Nicol{\'a}s and Toro-G{\'o}mez, Maria Paula and Hern{\'a}ndez, Andr{\'e}s and Demuro, Bruno and Barona-Cort{\'e}s, Eliana and Mendoza-Henao, Angela M. and Sierra-Ricaurte, Andr{\'e}s and P{\'e}rez-Pe{\~n}a, Sebastian and Dodhia, Rahul and Arbel{\'a}ez, Pablo and Lavista, Juan},
+  journal   = {Scientific Data},
+  publisher = {Springer Science and Business Media LLC},
+  year      = {2026},
+  doi       = {10.1038/s41597-026-08574-5},
+  url       = {https://doi.org/10.1038/s41597-026-08574-5}
+}
 ```
-Audio files (48 kHz) + RAVEN label files
-  → Annotations (COCO JSON)
-  → Sliding windows (5s, 4s overlap)
-  → Segmented windows (filter boundary-crossing windows)
-  → Mel spectrograms (.npy)
-  → Leave-one-project-out CV splits (non-overlapping test)
-  → ResNet classifier (binary or multiclass)
-  → Evaluation with aggregated metrics
-```
-
-For inference on new audio, see the [PytorchWildlife](https://github.com/microsoft/CameraTraps) library.
