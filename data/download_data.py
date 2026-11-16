@@ -1,4 +1,4 @@
-"""Download and extract the Humboldt - AI4G Bioacoustics Dataset from Zenodo.
+"""Download and extract PteroSet from Zenodo.
 
 Downloads individual files using parallel chunked HTTP range requests.
 
@@ -7,12 +7,16 @@ Usage:
     python download_data.py
     python download_data.py --output-dir ./my_data --keep-zip
     python download_data.py --workers 16
+
 """
 
 import argparse
+import csv
 import hashlib
 import logging
+import shutil
 import time
+import wave
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -27,6 +31,12 @@ from urllib3.util.retry import Retry
 # Zenodo "concept" record ID: stays constant across all versions of the
 # dataset, so resolving it via /versions/latest always gets the newest one.
 CONCEPT_RECORD_ID = "18554918"
+
+# The results reported in the paper were obtained from the 48 kHz audio of the
+# first dataset version. 
+PAPER_AUDIO_RECORD_ID = "18563039"
+PAPER_AUDIO_ZIP = "audios_48khz.zip"
+PAPER_AUDIO_SAMPLE_RATE = 48000
 
 DOWNLOAD_DIR = Path(__file__).resolve().parent
 DEFAULT_WORKERS = 8
@@ -173,6 +183,97 @@ def extract_zip(zip_path: Path, dest: Path) -> None:
     print(f"Extraction of {zip_path.name} complete.")
 
 
+def download_entry(entry: dict, dest: Path, workers: int, keep_zip: bool) -> None:
+    """Download one Zenodo file entry into *dest*, verify it and extract ZIPs."""
+    filename: str = entry["key"]
+    size: int = entry["size"]
+    content_url: str = entry["links"]["content"]
+    expected_md5: str = entry["checksum"].removeprefix("md5:")
+
+    print(f"\nDownloading {filename} ({size / (1024 ** 3):.2f} GB) ...")
+
+    if size > CHUNK_SIZE:
+        file_path = download_file_parallel(content_url, dest, filename, size, workers)
+    else:
+        file_path = download_file_simple(content_url, dest, filename)
+
+    print(f"Verifying checksum for {filename} ...")
+    if verify_checksum(file_path, expected_md5):
+        print(f"Checksum OK.")
+    else:
+        log.warning("Checksum mismatch for %s!", filename)
+
+    if filename.endswith(".zip"):
+        extract_zip(file_path, dest)
+        if not keep_zip:
+            file_path.unlink()
+            print(f"Removed {filename}.")
+
+
+# ── 48 kHz audio (paper results) ─────────────────────────────────────────────
+
+def read_audio_projects(dest: Path) -> dict[str, str]:
+    """Return ``{audio_file: project_name}`` from the metadata*.csv in *dest*."""
+    candidates = sorted(dest.glob("metadata*.csv"))
+    if not candidates:
+        raise FileNotFoundError(f"No metadata*.csv file found in {dest}")
+    with open(candidates[0], newline="", encoding="utf-8-sig") as fh:
+        return {row["audio_file"]: row["project_name"] for row in csv.DictReader(fh)}
+
+
+def _wav_sample_rate(path: Path) -> int:
+    with wave.open(str(path), "rb") as wav:
+        return wav.getframerate()
+
+
+def check_no_other_audio(dest: Path, audio_projects: dict[str, str]) -> None:
+    """Fail if a project folder already holds audio at another sample rate.
+
+    Mixing 48 kHz and 192 kHz files in the same folders would silently change
+    the spectrograms, so the existing audio has to be moved away first.
+    """
+    for audio_file, project in audio_projects.items():
+        existing = dest / project / audio_file
+        if existing.exists() and _wav_sample_rate(existing) != PAPER_AUDIO_SAMPLE_RATE:
+            raise SystemExit(
+                f"{existing} already exists with a sample rate of "
+                f"{_wav_sample_rate(existing)} Hz. Move or rename the existing "
+                f"audio folders in {dest} before downloading the 48 kHz audio."
+            )
+
+
+def place_audio_in_project_folders(
+    dest: Path, audio_projects: dict[str, str]
+) -> None:
+    """Move the flat 48 kHz WAVs into ``<dest>/<project>/``.
+
+    The 48 kHz release stores every WAV in a single ``audios_48khz/`` folder,
+    while the pipeline expects ``<project>/<audio_file>``.
+    """
+    flat_dir = dest / Path(PAPER_AUDIO_ZIP).stem
+    missing = [f for f in audio_projects if not (flat_dir / f).exists()
+               and not (dest / audio_projects[f] / f).exists()]
+    if missing:
+        raise SystemExit(
+            f"{len(missing)} audio file(s) listed in the metadata are missing "
+            f"from {flat_dir} (e.g. {missing[0]})."
+        )
+
+    moved = 0
+    for audio_file, project in audio_projects.items():
+        source = flat_dir / audio_file
+        target = dest / project / audio_file
+        if not source.exists():
+            continue  # already placed by a previous run
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+        moved += 1
+
+    if flat_dir.is_dir() and not any(flat_dir.iterdir()):
+        flat_dir.rmdir()
+    print(f"Placed {moved} audio file(s) into their project folders in {dest}.")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -202,6 +303,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=f"Zenodo record ID (default: last version).",
     )
+    parser.add_argument(
+        "--audio",
+        type=str,
+        choices=["192khz", "48khz"],
+        default="192khz",
+        help=(
+            "Audio to download. '192khz' (default) gets the original recordings "
+            "of the selected record. '48khz' gets the 48 kHz audio of record "
+            f"{PAPER_AUDIO_RECORD_ID} instead."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -219,36 +331,50 @@ def main() -> None:
         print(f"Fetching file list for Zenodo record {args.record_id} ...")
         zenodo_files_url = f"https://zenodo.org/api/records/{args.record_id}/files"
 
-    
     files = get_file_list(zenodo_files_url)
+
+    paper_audio = None
+    if args.audio == "48khz":
+        # The metadata tells which ZIPs hold the 192 kHz audio (<project>.zip)
+        # and where each 48 kHz WAV belongs, so it has to be downloaded first.
+        metadata_entries = [
+            e for e in files
+            if e["key"].startswith("metadata") and e["key"].endswith(".csv")
+        ]
+        if not metadata_entries:
+            raise SystemExit("The Zenodo record has no metadata*.csv file.")
+        for entry in metadata_entries:
+            download_entry(entry, dest, args.workers, args.keep_zip)
+        audio_projects = read_audio_projects(dest)
+        check_no_other_audio(dest, audio_projects)
+
+        project_zips = {f"{project}.zip" for project in audio_projects.values()}
+        files = [
+            e for e in files
+            if e["key"] not in project_zips and e not in metadata_entries
+        ]
+
+        paper_files_url = (
+            f"https://zenodo.org/api/records/{PAPER_AUDIO_RECORD_ID}/files"
+        )
+        paper_audio = next(
+            e for e in get_file_list(paper_files_url) if e["key"] == PAPER_AUDIO_ZIP
+        )
+        print(
+            f"Using the 48 kHz audio from Zenodo record {PAPER_AUDIO_RECORD_ID} "
+            f"instead of {', '.join(sorted(project_zips))}."
+        )
+
     print(f"Found {len(files)} file(s):")
-    for entry in files:
+    for entry in files + ([paper_audio] if paper_audio else []):
         print(f"  • {entry['key']}  ({entry['size'] / (1024 ** 2):.1f} MB)")
 
     for entry in files:
-        filename: str = entry["key"]
-        size: int = entry["size"]
-        content_url: str = entry["links"]["content"]
-        expected_md5: str = entry["checksum"].removeprefix("md5:")
+        download_entry(entry, dest, args.workers, args.keep_zip)
 
-        print(f"\nDownloading {filename} ({size / (1024 ** 3):.2f} GB) ...")
-
-        if size > CHUNK_SIZE:
-            file_path = download_file_parallel(content_url, dest, filename, size, args.workers)
-        else:
-            file_path = download_file_simple(content_url, dest, filename)
-
-        print(f"Verifying checksum for {filename} ...")
-        if verify_checksum(file_path, expected_md5):
-            print(f"Checksum OK.")
-        else:
-            log.warning("Checksum mismatch for %s!", filename)
-
-        if filename.endswith(".zip"):
-            extract_zip(file_path, dest)
-            if not args.keep_zip:
-                file_path.unlink()
-                print(f"Removed {filename}.")
+    if paper_audio is not None:
+        download_entry(paper_audio, dest, args.workers, args.keep_zip)
+        place_audio_in_project_folders(dest, audio_projects)
 
     print("\nDone.")
 
