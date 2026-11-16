@@ -38,6 +38,77 @@ def spectrogram_filename(sound_path, start_sample, end_sample):
     return f"{base}_{start_sample}_{end_sample}.npy"
 
 
+SPECTROGRAM_PROVENANCE_FILE = "provenance.json"
+
+
+def spectrogram_provenance(config: DomainConfig, sound_paths: List[str]) -> dict:
+    """Describe the audio and parameters a spectrograms folder is computed from.
+
+    The source sample rate is read from the audio files themselves, because
+    spectrograms computed from the 48 kHz and the 192 kHz audio differ even
+    though both end up at ``config.audio.sample_rate``.
+    """
+    import soundfile as sf
+
+    source_sample_rates = sorted({sf.info(path).samplerate for path in sound_paths})
+    return {
+        "source_sample_rates": source_sample_rates,
+        "sample_rate": config.audio.sample_rate,
+        "n_fft": config.spectrogram.n_fft,
+        "hop_length": config.spectrogram.hop_length,
+        "n_mels": config.spectrogram.n_mels,
+        "top_db": config.spectrogram.top_db,
+        "fill_highfreq": config.spectrogram.fill_highfreq,
+        "noise_db_std": config.spectrogram.noise_db_std,
+        "storage_dtype": config.spectrogram.storage_dtype,
+    }
+
+
+def check_spectrogram_provenance(spectrograms_dir: str, provenance: dict) -> None:
+    """Record *provenance* in *spectrograms_dir*, or refuse to mix sources.
+
+    Existing spectrograms are never recomputed, so a folder computed from other
+    audio or with other parameters would silently be reused. Stop instead.
+    """
+    provenance_path = os.path.join(spectrograms_dir, SPECTROGRAM_PROVENANCE_FILE)
+
+    if os.path.exists(provenance_path):
+        with open(provenance_path, "r") as f:
+            stored = json.load(f)
+        if stored != provenance:
+            changed = sorted(
+                key
+                for key in set(stored) | set(provenance)
+                if stored.get(key) != provenance.get(key)
+            )
+            details = "\n".join(
+                f"  - {key}: existing={stored.get(key)!r}, current={provenance.get(key)!r}"
+                for key in changed
+            )
+            raise SystemExit(
+                f"The spectrograms in {spectrograms_dir} were computed from "
+                f"different audio or parameters:\n{details}\n"
+                "Move or delete that folder (or set another spectrograms_dir in "
+                "the config) and run this step again."
+            )
+        return
+
+    has_spectrograms = any(
+        entry.name.endswith(".npy") for entry in os.scandir(spectrograms_dir)
+    )
+    if has_spectrograms:
+        raise SystemExit(
+            f"{spectrograms_dir} already contains spectrograms but no "
+            f"{SPECTROGRAM_PROVENANCE_FILE}, so the audio they were computed from "
+            "cannot be verified. Move or delete that folder (or set another "
+            "spectrograms_dir in the config) and run this step again."
+        )
+
+    with open(provenance_path, "w") as f:
+        json.dump(provenance, f, indent=2)
+    print(f"Saved spectrogram provenance to: {provenance_path}")
+
+
 def count_window_labels(windows: List[dict]) -> dict:
     """Count label distribution in windows."""
     counts = {}
@@ -319,6 +390,12 @@ def run_spectrograms(config: DomainConfig, windows: List[dict]) -> None:
             f"Skipped {skipped} window(s) that fall outside their sound's "
             "actual duration (stale windows mapping vs. annotations)."
         )
+
+    provenance = spectrogram_provenance(
+        config, sorted({win["sound_path"] for win in inference_windows})
+    )
+    print(f"  - source audio sample rate(s): {provenance['source_sample_rates']}")
+    check_spectrogram_provenance(spectrograms_dir, provenance)
 
     compute_mel_spectrograms_gpu(
         windows=inference_windows,
