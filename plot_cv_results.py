@@ -9,24 +9,21 @@ This script:
 5. Computes mean and std across folds
 
 Usage:
-    python plot_cv_results.py --fold_dir data --config data/config.yaml --checkpoint_dir checkpoints
+    python plot_cv_results.py --fold_dir data/folds_segmented --config data/config.yaml --checkpoint_dir data/checkpoints
 """
 
 import argparse
-import json
 import os
-from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import torch
 from sklearn.metrics import precision_recall_curve, auc, confusion_matrix
 
 # Import from training script
-from train import SpectrogramDataModule, DataModuleConfig
+from train import SpectrogramDataModule, DataModuleConfig, resolve_fold_checkpoint
 
 # Import from PytorchWildlife core library
 from PytorchWildlife.models.bioacoustics import ResNetClassifier
@@ -34,16 +31,9 @@ from PytorchWildlife.data.bioacoustics.bioacoustics_configs import load_config
 
 # Fold-to-project mapping and colors matching statistics_by_project.png
 # Projects in the statistics plot (in order): MAP1, PPA1, PPA2, PPA3, PPA4
-# Fold 0→PPA1, Fold 1→PPA2, Fold 2→PPA3, Fold 3→PPA4, Fold 4→MAP1
-_PROJECT_COLORS = plt.cm.magma(np.linspace(0.2, 0.85, 5))
+# Fold 0→MAP1, Fold 1→PPA1, Fold 2→PPA2, Fold 3→PPA3, Fold 4→PPA4
 FOLD_PROJECT_NAMES = ["MAP1", "PPA1", "PPA2", "PPA3", "PPA4"]
-FOLD_COLORS = [
-    _PROJECT_COLORS[1],  # Fold 0 → PPA1
-    _PROJECT_COLORS[2],  # Fold 1 → PPA2
-    _PROJECT_COLORS[3],  # Fold 2 → PPA3
-    _PROJECT_COLORS[4],  # Fold 3 → PPA4
-    _PROJECT_COLORS[0],  # Fold 4 → MAP1
-]
+FOLD_COLORS = list(plt.cm.magma(np.linspace(0.2, 0.85, 5)))
 
 
 def evaluate_fold(
@@ -58,6 +48,9 @@ def evaluate_fold(
 ) -> Dict:
     """
     Evaluate a single fold and return predictions, targets, and probabilities.
+
+    The reported ``auprc`` is the trapezoidal area under the precision-recall
+    curve, ``auc(recall, precision)``, not average precision.
 
     Returns:
         Dictionary with 'preds', 'targets', 'probs', and 'metrics'
@@ -93,7 +86,6 @@ def evaluate_fold(
     all_logits = []
     all_targets = []
     all_preds = []
-    all_paths = []
 
     test_loader = dm.test_dataloader()
 
@@ -115,7 +107,6 @@ def evaluate_fold(
             all_logits.append(logits.cpu().numpy())
             all_targets.append(y.cpu().numpy())
             all_preds.append(preds.cpu().numpy())
-            all_paths.extend(path)
 
     # Concatenate results
     all_logits = np.concatenate(all_logits)
@@ -159,7 +150,7 @@ def evaluate_fold(
             else 0.0
         )
 
-        # AUPRC
+        # AUPRC (trapezoidal area under the PR curve, not average precision)
         prec_curve, rec_curve, _ = precision_recall_curve(all_targets, all_probs)
         auprc = auc(rec_curve, prec_curve)
 
@@ -184,8 +175,6 @@ def evaluate_fold(
         "preds": all_preds,
         "targets": all_targets,
         "probs": all_probs,
-        "paths": all_paths,
-        "test_df": pd.read_csv(test_csv),
         "metrics": metrics,
         "is_binary": model.is_binary,
     }
@@ -237,215 +226,12 @@ def plot_precision_recall_curves(fold_results: List[Dict], output_path: str):
     plt.close()
 
 
-def _hz_to_mel_bin(freq_hz, max_freq_hz, n_mels):
-    """Convert a frequency in Hz to a mel-scale bin position."""
-    mel = 2595.0 * np.log10(1.0 + freq_hz / 700.0)
-    mel_max = 2595.0 * np.log10(1.0 + max_freq_hz / 700.0)
-    return mel / mel_max * n_mels
-
-
-def plot_qualitative_results(
-    fold_results: List[Dict],
-    output_path: str,
-    audio_dir: str,
-    annotations_path: str = None,
-    class_names: List[str] = None,
-    seed: int = 42,
-    duration_sec: float = 5.0,
-    max_freq_hz: float = 24000.0,
-    n_mels: int = 224,
-    fold_index: int = 3,
-):
-    """
-    Plot a 1×4 grid of spectrograms showing one TP, TN, FP, and FN example
-    for a single fold, and save the corresponding trimmed audio clips.
-
-    Each column corresponds to a category (TP, TN, FP, FN).
-    For TP and FN examples, overlapping annotations are drawn as rectangles.
-    Audio clips are saved next to the plot as
-    ``<output_stem>_fold<F>_<category>.wav``.
-
-    Args:
-        fold_results: List of result dictionaries from evaluate_fold.
-        output_path: Path to save the plot image.
-        audio_dir: Directory containing the source audio files.
-        annotations_path: Path to the annotations JSON file.
-        class_names: List mapping class indices to human-readable names.
-        seed: Random seed for reproducibility.
-        duration_sec: Duration of each spectrogram window in seconds.
-        max_freq_hz: Maximum frequency in Hz (Nyquist frequency).
-        n_mels: Number of mel frequency bins.
-        fold_index: Which fold to plot (default: 3, i.e. PPA4 test set).
-    """
-    rng = np.random.default_rng(seed)
-    categories = ["TP", "TN", "FP", "FN"]
-    cat_colors = {"TP": "green", "TN": "green", "FP": "red", "FN": "red"}
-    n_cols = len(categories)
-    out_stem = Path(output_path).stem
-    out_dir = Path(output_path).parent
-
-    result = fold_results[fold_index]
-    project_name = (
-        FOLD_PROJECT_NAMES[fold_index] if fold_index < len(FOLD_PROJECT_NAMES) else ""
-    )
-
-    # Load annotations indexed by sound_id for TP/FN overlay
-    annotations_by_sound = {}
-    if annotations_path and os.path.exists(annotations_path):
-        with open(annotations_path) as f:
-            ann_data = json.load(f)
-        for ann in ann_data.get("annotations", []):
-            sid = ann["sound_id"]
-            annotations_by_sound.setdefault(sid, []).append(ann)
-
-    # Precompute mel-scale frequency tick positions
-    freq_ticks_hz = np.array([0, 1000, 2000, 4000, 8000, 16000, 24000])
-    freq_ticks_hz = freq_ticks_hz[freq_ticks_hz <= max_freq_hz]
-    mel_ticks = 2595.0 * np.log10(1.0 + freq_ticks_hz / 700.0)
-    mel_max = 2595.0 * np.log10(1.0 + max_freq_hz / 700.0)
-    mel_tick_positions = mel_ticks / mel_max * n_mels
-    freq_tick_labels = [
-        f"{int(f / 1000)}k" if f >= 1000 else str(int(f)) for f in freq_ticks_hz
-    ]
-
-    fig, axes = plt.subplots(1, n_cols, figsize=(3 * n_cols, 3.5))
-
-    # Pre-compute category indices for the selected fold
-    preds = result["preds"]
-    targets = result["targets"]
-    cat_indices = {
-        "TP": np.where((preds == 1) & (targets == 1))[0],
-        "TN": np.where((preds == 0) & (targets == 0))[0],
-        "FP": np.where((preds == 1) & (targets == 0))[0],
-        "FN": np.where((preds == 0) & (targets == 1))[0],
-    }
-
-    pending_rects = []
-
-    for col, cat in enumerate(categories):
-        ax = axes[col]
-        paths = result["paths"]
-        test_df = result["test_df"]
-        indices = cat_indices[cat]
-
-        ax.set_title(cat, fontsize=11, fontweight="bold", color=cat_colors[cat])
-
-        if len(indices) == 0:
-            ax.text(
-                0.5,
-                0.5,
-                f"No {cat}",
-                ha="center",
-                va="center",
-                fontsize=11,
-                transform=ax.transAxes,
-            )
-            ax.set_xticks([])
-            ax.set_yticks([])
-        else:
-            idx = rng.choice(indices)
-            spec = np.load(paths[idx])
-            n_time_frames = spec.shape[-1]
-            ax.imshow(spec, aspect="auto", origin="lower", cmap="magma")
-
-            # X-axis: time in seconds
-            time_ticks_sec = np.arange(0, duration_sec + 0.5, 1.0)
-            time_tick_positions = time_ticks_sec / duration_sec * n_time_frames
-            ax.set_xticks(time_tick_positions)
-            ax.set_xticklabels([f"{t:.0f}" for t in time_ticks_sec], fontsize=7)
-            ax.set_xlabel("Time (s)", fontsize=8)
-
-            # Y-axis: frequency in mel scale
-            ax.set_yticks(mel_tick_positions)
-            if col == 0:
-                ax.set_yticklabels(freq_tick_labels, fontsize=7)
-                ax.set_ylabel("Freq (Hz)", fontsize=9, labelpad=1)
-            else:
-                ax.set_yticklabels([])
-
-            # Resolve CSV row for annotation overlay and audio saving
-            spec_basename = os.path.basename(paths[idx])
-            spec_to_row = {r["spec_name"]: r for _, r in test_df.iterrows()}
-            csv_row = spec_to_row.get(spec_basename)
-
-            # Save trimmed audio clip
-            if csv_row is not None:
-                audio_path = os.path.join(audio_dir, csv_row["sound_filename"])
-                start_sample = int(csv_row["start"])
-                end_sample = int(csv_row["end"])
-                sr = int(csv_row["sample_rate"])
-                try:
-                    audio_data, _ = sf.read(
-                        audio_path,
-                        start=start_sample,
-                        stop=end_sample,
-                        dtype="float32",
-                    )
-                    clip_path = out_dir / f"{out_stem}_fold{fold_index}_{cat}.wav"
-                    sf.write(str(clip_path), audio_data, sr)
-                    print(f"  Saved audio: {clip_path}")
-                except Exception as e:
-                    print(
-                        f"  Warning: could not save audio for fold {fold_index} {cat}: {e}"
-                    )
-
-            # Collect bounding-box rectangles to add after saving the no-bbox version
-            if cat in ("TP", "FN") and csv_row is not None and annotations_by_sound:
-                sound_id = int(csv_row["sound_id"])
-                sr = int(csv_row["sample_rate"])
-                win_start_sec = int(csv_row["start"]) / sr
-                win_end_sec = int(csv_row["end"]) / sr
-
-                for ann in annotations_by_sound.get(sound_id, []):
-                    t_min = ann["t_min"]
-                    t_max = ann["t_max"]
-                    if t_max <= win_start_sec or t_min >= win_end_sec:
-                        continue
-                    t0 = max(t_min - win_start_sec, 0.0)
-                    t1 = min(t_max - win_start_sec, duration_sec)
-                    x0 = t0 / duration_sec * n_time_frames
-                    x1 = t1 / duration_sec * n_time_frames
-
-                    f_min = ann.get("f_min", 0.0)
-                    f_max = ann.get("f_max", max_freq_hz)
-                    y0 = _hz_to_mel_bin(f_min, max_freq_hz, n_mels)
-                    y1 = _hz_to_mel_bin(f_max, max_freq_hz, n_mels)
-
-                    pending_rects.append((ax, x0, y0, x1 - x0, y1 - y0))
-
-    fig.suptitle("Qualitative Examples", fontsize=15, fontweight="bold")
-    plt.tight_layout()
-
-    # Save version without bounding boxes
-    no_bbox_path = out_dir / f"{out_stem}_no_bbox.png"
-    plt.savefig(str(no_bbox_path), dpi=300, bbox_inches="tight")
-    print(f"\nQualitative results (no bboxes) saved to: {no_bbox_path}")
-
-    # Add bounding-box rectangles and save version with them
-    for ax, x0, y0, w, h in pending_rects:
-        rect = mpatches.Rectangle(
-            (x0, y0),
-            w,
-            h,
-            linewidth=1.5,
-            edgecolor="cyan",
-            facecolor="none",
-            linestyle="--",
-        )
-        ax.add_patch(rect)
-
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
-    print(f"Qualitative results (with bboxes) saved to: {output_path}")
-    plt.close()
-
-
-def print_results_table(fold_results: List[Dict], saved_metrics: Dict = None):
+def print_results_table(fold_results: List[Dict]):
     """
     Print results in a formatted table.
 
     Args:
         fold_results: List of result dictionaries from evaluate_fold
-        saved_metrics: Optional dict with metrics from training output
     """
     print("\n" + "=" * 90)
     print("CROSS-VALIDATION RESULTS")
@@ -485,10 +271,6 @@ def print_results_table(fold_results: List[Dict], saved_metrics: Dict = None):
         print(f"\nFold {fold_num}:")
         metrics = result["metrics"]
 
-        # If saved_metrics provided, use those (includes loss which we don't compute)
-        if saved_metrics and fold_num in saved_metrics:
-            metrics = saved_metrics[fold_num]
-
         for metric_name in metric_names:
             if metric_name in metrics:
                 value = metrics[metric_name]
@@ -502,11 +284,8 @@ def print_results_table(fold_results: List[Dict], saved_metrics: Dict = None):
 
     # Create dataframe for easier computation
     df_data = []
-    for fold_num, result in enumerate(fold_results):
-        metrics = result["metrics"]
-        if saved_metrics and fold_num in saved_metrics:
-            metrics = saved_metrics[fold_num]
-        df_data.append(metrics)
+    for result in fold_results:
+        df_data.append(result["metrics"])
 
     df = pd.DataFrame(df_data)
 
@@ -536,13 +315,13 @@ def main():
     parser.add_argument(
         "--fold_dir",
         type=str,
-        default="data",
+        default="data/folds_segmented",
         help="Base directory containing fold_X subdirectories",
     )
     parser.add_argument(
         "--checkpoint_dir",
         type=str,
-        default="checkpoints",
+        default="data/checkpoints",
         help="Base directory containing fold_X checkpoint subdirectories",
     )
     parser.add_argument(
@@ -551,18 +330,6 @@ def main():
     parser.add_argument(
         "--output_dir", type=str, default="outputs", help="Directory to save plots"
     )
-    parser.add_argument(
-        "--audio_dir",
-        type=str,
-        default="data/audios_48khz",
-        help="Directory containing source audio files",
-    )
-    parser.add_argument(
-        "--annotations",
-        type=str,
-        default="data/annotations_identification.json",
-        help="Path to annotations JSON file",
-    )
 
     # Model arguments
     parser.add_argument(
@@ -570,13 +337,6 @@ def main():
         type=str,
         default=None,
         help="Specific checkpoint filename (default: best checkpoint)",
-    )
-
-    # Saved metrics (optional)
-    parser.add_argument(
-        "--use_saved_metrics",
-        action="store_true",
-        help="Use metrics provided in script rather than recomputing",
     )
     parser.add_argument(
         "--num_workers",
@@ -588,7 +348,6 @@ def main():
     args = parser.parse_args()
 
     # Load config
-    class_names = None
     if args.config:
         cfg = load_config(args.config)
         spectrograms_root = cfg.paths.spectrograms_dir
@@ -597,8 +356,6 @@ def main():
         batch_size = cfg.training.batch_size
         num_workers = cfg.training.num_workers
         normalize = cfg.training.normalize
-        if hasattr(cfg, "class_names") and cfg.class_names:
-            class_names = [cfg.class_names[k] for k in sorted(cfg.class_names.keys())]
     else:
         spectrograms_root = "data/spectrograms"
         x_col = "spec_name"
@@ -616,61 +373,8 @@ def main():
     # Find all fold directories
     fold_dirs = sorted([d for d in os.listdir(args.fold_dir) if d.startswith("fold_")])
     print(f"Found {len(fold_dirs)} folds: {fold_dirs}")
-
-    # Saved metrics from user's training output (optional)
-    saved_metrics = None
-    if args.use_saved_metrics:
-        saved_metrics = {
-            0: {
-                "loss": 1.6783,
-                "f1": 0.7363,
-                "auprc": 0.7470,
-                "precision": 0.8190,
-                "recall": 0.6688,
-                "acc_neg": 0.9554,
-                "acc_pos": 0.6688,
-            },
-            1: {
-                "loss": 1.8658,
-                "f1": 0.7415,
-                "auprc": 0.6859,
-                "precision": 0.6794,
-                "recall": 0.8163,
-                "acc_neg": 0.9122,
-                "acc_pos": 0.8163,
-            },
-            2: {
-                "loss": 1.4397,
-                "f1": 0.7437,
-                "auprc": 0.7444,
-                "precision": 0.7759,
-                "recall": 0.7141,
-                "acc_neg": 0.9479,
-                "acc_pos": 0.7141,
-            },
-            3: {
-                "loss": 1.2951,
-                "f1": 0.7647,
-                "auprc": 0.7645,
-                "precision": 0.7666,
-                "recall": 0.7629,
-                "acc_neg": 0.9310,
-                "acc_pos": 0.7629,
-            },
-            4: {
-                "loss": 6.8471,
-                "f1": 0.6517,
-                "auprc": 0.5465,
-                "precision": 0.5099,
-                "recall": 0.9028,
-                "acc_neg": 0.5040,
-                "acc_pos": 0.9028,
-            },
-        }
-
-        # Calculate overall accuracy from acc_neg and acc_pos
-        # We need to estimate class distribution to compute overall accuracy
-        # For now, we'll compute it during evaluation
+    if not fold_dirs:
+        raise FileNotFoundError(f"No fold_* directories found in {args.fold_dir}")
 
     # Evaluate each fold
     fold_results = []
@@ -681,29 +385,20 @@ def main():
         print(f"{'=' * 60}")
 
         # Find checkpoint
-        ckpt_dir = os.path.join(args.checkpoint_dir, f"fold_{fold_num}")
-
         if args.checkpoint_name:
-            ckpt_path = os.path.join(ckpt_dir, args.checkpoint_name)
+            ckpt_path = os.path.join(
+                args.checkpoint_dir, f"fold_{fold_num}", args.checkpoint_name
+            )
         else:
-            # Find best checkpoint (not last.ckpt)
-            ckpts = [
-                f
-                for f in os.listdir(ckpt_dir)
-                if f.endswith(".ckpt") and f != "last.ckpt"
-            ]
-            if not ckpts:
-                print(f"Warning: No checkpoint found in {ckpt_dir}, skipping...")
-                continue
-            ckpt_path = os.path.join(ckpt_dir, ckpts[0])
+            ckpt_path = resolve_fold_checkpoint(args.checkpoint_dir, fold_num)
 
-        # Find test CSV
+        # Find test CSV. A skipped fold would shift the fold-to-project
+        # mapping of the plots, so a missing file is an error.
         fold_path = os.path.join(args.fold_dir, fold_dirname)
         test_csv = os.path.join(fold_path, "test_split.csv")
 
         if not os.path.exists(test_csv):
-            print(f"Warning: Test CSV not found at {test_csv}, skipping...")
-            continue
+            raise FileNotFoundError(f"Test CSV not found at {test_csv}")
 
         # Evaluate fold
         result = evaluate_fold(
@@ -730,19 +425,8 @@ def main():
         pr_curve_path = os.path.join(args.output_dir, "precision_recall_curves.png")
         plot_precision_recall_curves(fold_results, pr_curve_path)
 
-    # Plot qualitative results
-    if fold_results:
-        qual_path = os.path.join(args.output_dir, "qualitative_results.png")
-        plot_qualitative_results(
-            fold_results,
-            output_path=qual_path,
-            audio_dir=args.audio_dir,
-            annotations_path=args.annotations,
-            class_names=class_names,
-        )
-
     # Print results table
-    print_results_table(fold_results, saved_metrics if args.use_saved_metrics else None)
+    print_results_table(fold_results)
 
     # Save results to CSV
     results_csv_path = os.path.join(args.output_dir, "cv_results.csv")
