@@ -14,10 +14,18 @@ Usage:
     python train.py --config config/template.yaml --train_csv train.csv --test_csv test.csv
 
     # Cross-validation with all 5 folds
-    python train.py --config data/config.yaml --cross_validation --fold_dir data
+    python train.py --config data/config.yaml --cross_validation --fold_dir data/folds_segmented
 
-    # Cross-validation with specific fold
-    python train.py --config data/config.yaml --cross_validation --fold_dir data --fold 0
+    # Train a single fold of the cross-validation (e.g. to run folds separately)
+    python train.py --config data/config.yaml --cross_validation --fold_dir data/folds_segmented --fold 0
+
+    # Evaluate each fold with its own checkpoint (<ckpt_path>/fold_<n>/)
+    python train.py --config data/config.yaml --cross_validation --fold_dir data/folds_segmented \
+        --ckpt_path data/checkpoints
+
+    # Finetune each fold from its own checkpoint (--ckpt_dir must differ from --ckpt_path)
+    python train.py --config data/config.yaml --cross_validation --fold_dir data/folds_segmented \
+        --ckpt_path data/checkpoints --finetune true --ckpt_dir checkpoints_finetuned
 """
 
 import argparse
@@ -196,6 +204,47 @@ class SpectrogramDataModule(pl.LightningDataModule):
         )
 
 
+def resolve_fold_checkpoint(ckpt_root: str, fold_num: int) -> str:
+    """Return the checkpoint to load for a fold from ``<ckpt_root>/fold_<n>/``.
+
+    A fold folder holds either a single downloaded checkpoint or the files
+    written during training (the best checkpoint plus ``last.ckpt``). When
+    several candidates exist, the one recorded as ``best_model_path`` in
+    ``last.ckpt`` is used; if that cannot be determined the choice would be
+    arbitrary, so it is an error.
+    """
+    fold_ckpt_dir = os.path.join(ckpt_root, f"fold_{fold_num}")
+    if not os.path.isdir(fold_ckpt_dir):
+        raise FileNotFoundError(f"Checkpoint folder not found: {fold_ckpt_dir}")
+
+    candidates = sorted(
+        f for f in os.listdir(fold_ckpt_dir) if f.endswith(".ckpt") and f != "last.ckpt"
+    )
+    if not candidates:
+        raise FileNotFoundError(f"No checkpoint found in {fold_ckpt_dir}")
+    if len(candidates) == 1:
+        return os.path.join(fold_ckpt_dir, candidates[0])
+
+    last_ckpt = os.path.join(fold_ckpt_dir, "last.ckpt")
+    if os.path.exists(last_ckpt):
+        callbacks = torch.load(last_ckpt, map_location="cpu", weights_only=False).get(
+            "callbacks", {}
+        )
+        for name, state in callbacks.items():
+            if name.startswith("ModelCheckpoint"):
+                # The stored path is absolute on the training machine.
+                best_name = str(state.get("best_model_path", "")).replace("\\", "/")
+                best_name = best_name.rsplit("/", 1)[-1]
+                if best_name in candidates:
+                    return os.path.join(fold_ckpt_dir, best_name)
+
+    raise RuntimeError(
+        f"Found {len(candidates)} checkpoints in {fold_ckpt_dir} ({', '.join(candidates)}) "
+        "and could not tell which one is the best. Keep a single checkpoint in "
+        "the folder."
+    )
+
+
 def train_single_fold(args, fold_num=None):
     """Train and evaluate on a single fold."""
 
@@ -309,14 +358,18 @@ def train_single_fold(args, fold_num=None):
         enable_progress_bar=True,
     )
 
-    if args.ckpt_path is None:
+    ckpt_path = args.ckpt_path
+    if ckpt_path is not None and args.cross_validation:
+        ckpt_path = resolve_fold_checkpoint(args.ckpt_path, fold_num)
+
+    if ckpt_path is None:
         trainer.fit(model, datamodule=dm)
         model.test_csv_path = test_csv
         test_results = trainer.test(model, datamodule=dm, ckpt_path="best")
         print(f"Best ckpt: {ckpt_cb.best_model_path}")
         print(f"Best score: {ckpt_cb.best_model_score}")
     else:
-        model = ResNetClassifier.load_from_checkpoint(args.ckpt_path)
+        model = ResNetClassifier.load_from_checkpoint(ckpt_path)
 
         if args.temperature != 1.0:
             model.temperature = torch.tensor(args.temperature, device=model.device)
@@ -334,7 +387,7 @@ def train_single_fold(args, fold_num=None):
             model.hparams.freeze_backbone = args.freeze_backbone
             model.hparams.backbone_lr_ratio = args.backbone_lr_ratio
 
-            print(f"Finetuning from checkpoint: {args.ckpt_path}")
+            print(f"Finetuning from checkpoint: {ckpt_path}")
             model._apply_freezing_strategy()
 
             trainer.fit(model, datamodule=dm)
@@ -346,7 +399,7 @@ def train_single_fold(args, fold_num=None):
         else:
             model.test_csv_path = test_csv
             test_results = trainer.test(model, datamodule=dm)
-            print(f"Test completed from checkpoint {args.ckpt_path}")
+            print(f"Test completed from checkpoint {ckpt_path}")
 
     return test_results[0] if test_results else {}
 
@@ -408,12 +461,24 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--label_smoothing", type=float, default=0.0)
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--ckpt_path", type=str, default=None)
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        default=None,
+        help=(
+            "Checkpoint to evaluate or finetune from. With --cross_validation it "
+            "must be a folder with one fold_<n>/ subfolder per fold; otherwise a "
+            ".ckpt file"
+        ),
+    )
     parser.add_argument(
         "--ckpt_dir",
         type=str,
         default="checkpoints",
-        help="Root directory for checkpoint output (default: checkpoints)",
+        help=(
+            "Root directory for checkpoint output (default: checkpoints). Kept "
+            "apart from the pretrained checkpoints downloaded to data/checkpoints"
+        ),
     )
     parser.add_argument("--monitor_metric", type=str, default="val/f1")
     parser.add_argument(
@@ -480,6 +545,21 @@ def main():
             raise ValueError(
                 "--fold_dir must be specified when using --cross_validation"
             )
+
+        if args.ckpt_path is not None:
+            if not os.path.isdir(args.ckpt_path):
+                raise ValueError(
+                    "With --cross_validation, --ckpt_path must be a folder "
+                    "containing fold_<n>/ subfolders, not a single checkpoint "
+                    f"file: {args.ckpt_path}"
+                )
+            if args.finetune and os.path.abspath(args.ckpt_path) == os.path.abspath(
+                args.ckpt_dir
+            ):
+                raise ValueError(
+                    "--ckpt_dir must differ from --ckpt_path when finetuning, so "
+                    "the finetuned checkpoints are not mixed with the loaded ones"
+                )
 
         fold_dirs = sorted(
             [d for d in os.listdir(args.fold_dir) if d.startswith("fold_")]

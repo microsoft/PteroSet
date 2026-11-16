@@ -33,7 +33,6 @@ class HumboldtAves(BaseReader):
         self.annotation_files_path = os.path.join(self.data_path, "labels") 
         self.species_file = os.path.join(self.data_path, "species.csv")
         metadata_filename = _find_metadata_file(self.data_path)
-        breakpoint()
         self.metadata_file = os.path.join(self.data_path, metadata_filename)
         self.output_path = os.path.join(data_path, f"annotations_{annotation_level}.json")
 
@@ -59,10 +58,12 @@ class HumboldtAves(BaseReader):
             latitude = file_metadata["latitude"]
             longitude = file_metadata["longitude"]
             date_recorded = str(file_metadata["date_recorded"])
-            #breakpoint()
+            # Paths are relative to the repository root (e.g. data/MAP1/x.wav),
+            # where prepare_dataset.py is run from, whatever the current directory.
+            repo_root = os.path.dirname(os.path.abspath(self.data_path))
             self.annotation_creator.add_sound(
                 id=i,
-                file_name_path=os.path.join(os.path.relpath(sound_dir, "."), file_name),
+                file_name_path=os.path.join(os.path.relpath(sound_dir, repo_root), file_name),
                 duration=duration,
                 sample_rate=sample_rate,
                 latitude=latitude,
